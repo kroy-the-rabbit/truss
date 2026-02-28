@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package truss.v1;
+
+option go_package = "github.com/kroy/truss/backend/api/gen/go/truss/v1;trussv1";
+
+service ContextsService {
+  rpc ListContexts(ListContextsRequest) returns (ListContextsResponse);
+  rpc SetActiveContext(SetActiveContextRequest) returns (SetActiveContextResponse);
+  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+}
+
+message Context {
+  string name = 1;
+  string cluster = 2;
+  string user = 3;
+  bool is_active = 4;
+}
+
+message ListContextsRequest {}
+
+message ListContextsResponse {
+  repeated Context contexts = 1;
+}
+
+message SetActiveContextRequest {
+  string name = 1;
+}
+
+message SetActiveContextResponse {
+  Context context = 1;
+}
+
+message ListNamespacesRequest {
+  string context = 1;
+}
+
+message Namespace {
+  string name = 1;
+  string status = 2;
+}
+
+message ListNamespacesResponse {
+  repeated Namespace namespaces = 1;
+}

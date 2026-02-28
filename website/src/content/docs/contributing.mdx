@@ -1,0 +1,94 @@
+---
+title: Contributing
+description: How to contribute to Truss — bug reports, pull requests, and development setup.
+order: 6
+---
+
+import Callout from '@/components/Callout.astro';
+
+Thanks for contributing to Truss. The project is in the `1.0.x` production line, so changes should preserve operator safety, backwards compatibility, and release quality.
+
+## Development Setup
+
+### Requirements
+
+- **Node.js** 22+
+- **Go** 1.25+
+- **buf** CLI
+- `protoc-gen-go` and `protoc-gen-connect-go` on `PATH`
+- `make`
+- A working kubeconfig / Kubernetes credentials
+
+### Setup
+
+```bash
+# Clone
+git clone https://github.com/kroy-the-rabbit/truss.git
+cd truss
+
+# Frontend deps
+cd app && npm ci
+
+# Backend deps
+cd ../backend && go mod download
+
+# Generate protobuf stubs
+make proto
+
+# Build backend daemon
+make backend-dev
+
+# Run dev server
+cd ../app && npm run dev
+```
+
+### Tests
+
+```bash
+# Backend
+cd backend && go test ./...
+
+# Frontend unit tests
+cd app && npm run test
+
+# Frontend smoke tests (Playwright)
+cd app && npm run test:e2e
+```
+
+## Before You Open a PR
+
+- Check for an existing issue or discussion first
+- Keep changes scoped — feature, refactor, docs, or CI in separate PRs
+- For UI changes, include screenshots or a short video
+- For behavioral changes, include tests or explain why tests are not practical
+
+## Reporting Issues
+
+Open a [GitHub issue](https://github.com/kroy-the-rabbit/truss/issues/new) and include:
+
+- Expected vs actual behavior
+- Reproduction steps
+- Truss version
+- OS / architecture
+- Kubernetes version and cluster type
+
+<Callout type="warning">
+  For **security vulnerabilities**, use the [Security policy](/docs/security) instead of a public issue.
+</Callout>
+
+## Commit Style
+
+- Imperative mood: `Add`, `Fix`, `Refactor`
+- Concise first line (< 72 chars)
+- Explain `why` in the body for non-trivial changes
+- Signed commits preferred for release work
+
+## Contributor License Agreement
+
+By submitting a PR, you agree to the terms of the [CLA](https://github.com/kroy-the-rabbit/truss/blob/main/CLA.md). Contributions are accepted under Apache License 2.0.
+
+## Community
+
+- [Issues](https://github.com/kroy-the-rabbit/truss/issues)
+- [Discussions](https://github.com/kroy-the-rabbit/truss/discussions)
+- [Security policy](https://github.com/kroy-the-rabbit/truss/blob/main/SECURITY.md)

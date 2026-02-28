@@ -1,0 +1,120 @@
+---
+title: Operations & Troubleshooting
+description: Day-2 operations, common issues, and troubleshooting for Truss in production.
+order: 7
+---
+
+import Callout from '@/components/Callout.astro';
+
+## Operating Model
+
+Truss runs a local backend daemon (`trussd`) bound to `127.0.0.1` on an ephemeral port. It communicates with clusters using kubeconfig credentials from the encrypted vault.
+
+**No cluster-side components are installed.** Cluster access depends on the selected context's credentials and RBAC.
+
+## Recommended Safety Practices
+
+- Keep Truss in **RO mode** unless actively performing a mutation
+- Use **separate profiles** for production vs non-production clusters
+- **Color-label profiles** for fast visual confirmation (e.g. red = production)
+- Validate active context and namespace before YAML apply, delete, restart, or Helm operations
+- Restrict plugin usage to reviewed, trusted code
+
+## Common Issues
+
+### Resources appear blank after connecting
+
+**Likely cause:** Initial watch/discovery cache warm-up.
+
+On large or CRD-heavy clusters, Truss may take 10–30 seconds to fully sync. The Overview shows a warm-up progress indicator.
+
+**What to do:** Wait for the warm-up indication to clear. Confirm connectivity with:
+
+```bash
+kubectl get ns --context <your-context>
+```
+
+### Resource list is empty
+
+Possible causes:
+- Wrong namespace selected
+- Name filter active
+- RBAC denies `list` on that resource
+
+Checks:
+- Clear the resource filter
+- Switch to **All namespaces**
+- Run `kubectl auth can-i list <resource> -n <namespace>`
+
+### Credential helper not found (`exec plugin` error)
+
+Truss launches auth helper commands from the desktop app environment, which may differ from your shell `PATH`.
+
+**Fixes:**
+1. Install the helper (e.g. `gke-gcloud-auth-plugin`, `aws-iam-authenticator`, `kubelogin`)
+2. Add its directory to **Preferences → Exec PATH hints**
+3. Restart Truss
+
+### Port-forward stopped after vault lock
+
+This is expected. Locking the vault stops all active port-forward sessions — this preserves a consistent lock model.
+
+**Resume:** Unlock the vault and re-open port-forwards.
+
+### File transfer fails inside a container
+
+Truss file transfer uses `sh` and POSIX utilities inside the container.
+
+**Not supported:**
+- Distroless images (no shell)
+- Containers missing required shell utilities
+
+**Workaround:** Use `kubectl cp` or a debug sidecar.
+
+### App feels slow on a large cluster
+
+Normal sources of latency: CRD-heavy discovery, informer cache warm-up, background search indexing.
+
+**Mitigations:**
+- Let warm-up complete before broad navigation/search
+- Narrow to specific namespaces when possible
+- Discovery cache now persists across restarts — subsequent launches are faster
+
+### Vault unlock fails or startup shows a store error
+
+Possible causes: wrong password, missing GPG key/agent, corrupted `contexts.enc`.
+
+**Recovery:**
+1. Back up `~/.config/truss/contexts.enc`
+2. Use the in-app reset option on the error screen
+3. Re-import contexts after reset
+
+## Backups and Recovery
+
+Back up before upgrades or workstation changes:
+
+| File | Purpose |
+|------|---------|
+| `contexts.enc` | Encrypted vault (kubeconfigs + profiles) |
+| `preferences.json` | App preferences |
+| `plugins/` | Local plugin files |
+| `user.css` | Custom CSS overrides |
+
+**Locations:**
+- Linux/macOS: `~/.config/truss/`
+- Windows: `%AppData%\truss\`
+
+## Diagnostics for Bug Reports
+
+Include with any bug report:
+- OS and architecture
+- Truss version (`Help` / app info)
+- Kubernetes version(s)
+- Cluster type (EKS, GKE, AKS, on-prem, etc.)
+- Whether the issue reproduces with `kubectl`
+- Resource kind / namespace involved
+- Screenshot or error text
+
+<Callout type="note">
+  See [Contributing](/docs/contributing) for full bug reporting guidance.
+</Callout>

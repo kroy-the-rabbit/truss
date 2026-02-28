@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package truss.v1;
+
+option go_package = "github.com/kroy/truss/backend/api/gen/go/truss/v1;trussv1";
+
+import "truss/v1/resources.proto";
+
+service YamlService {
+  rpc GetYaml(GetYamlRequest) returns (GetYamlResponse);
+  rpc ApplyYaml(ApplyYamlRequest) returns (ApplyYamlResponse);
+  rpc DiffYaml(DiffYamlRequest) returns (DiffYamlResponse);
+}
+
+message GetYamlRequest {
+  string context = 1;
+  string namespace = 2;
+  GVR gvr = 3;
+  string name = 4;
+}
+
+message GetYamlResponse {
+  string yaml = 1;
+}
+
+message ApplyYamlRequest {
+  string context = 1;
+  string namespace = 2;
+  string yaml = 3;
+  string field_manager = 4;
+}
+
+message ApplyYamlResponse {
+  bool success = 1;
+  string message = 2;
+  string resulting_yaml = 3;
+}
+
+message DiffYamlRequest {
+  string context = 1;
+  string namespace = 2;
+  GVR gvr = 3;
+  string name = 4;
+  string proposed_yaml = 5;
+}
+
+message DiffYamlResponse {
+  string diff = 1;
+}

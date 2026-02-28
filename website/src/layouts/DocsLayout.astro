@@ -1,0 +1,83 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import DocsSidebar from '@/components/DocsSidebar.astro';
+import { docsNav } from '@/lib/nav';
+
+interface Props {
+  title: string;
+  description?: string;
+  currentSlug: string;
+}
+
+const { title, description, currentSlug } = Astro.props;
+
+// Compute prev / next for navigation
+const allItems = docsNav.flatMap(g => g.items);
+const idx = allItems.findIndex(i => i.slug === currentSlug);
+const prev = idx > 0 ? allItems[idx - 1] : null;
+const next = idx < allItems.length - 1 ? allItems[idx + 1] : null;
+---
+
+<BaseLayout title={title} description={description}>
+  <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-10 flex gap-12">
+    <DocsSidebar currentSlug={currentSlug} />
+
+    <div class="min-w-0 flex-1">
+      <article
+        class="prose prose-gray dark:prose-invert max-w-3xl
+               prose-headings:scroll-mt-20
+               prose-a:text-teal-600 dark:prose-a:text-teal-400
+               prose-code:text-teal-700 dark:prose-code:text-teal-300
+               prose-pre:shadow-lg prose-pre:border prose-pre:border-gray-800"
+      >
+        <header class="mb-8 not-prose">
+          <h1 class="text-3xl font-bold tracking-tight text-gray-900 dark:text-white mb-2">
+            {title}
+          </h1>
+          {description && (
+            <p class="text-lg text-gray-500 dark:text-gray-400">{description}</p>
+          )}
+          <hr class="mt-6 border-gray-200 dark:border-gray-800" />
+        </header>
+        <slot />
+      </article>
+
+      <!-- Prev / Next navigation -->
+      {(prev || next) && (
+        <nav
+          class="mt-12 pt-6 border-t border-gray-200 dark:border-gray-800
+                 flex justify-between gap-4 not-prose"
+          aria-label="Documentation pagination"
+        >
+          {prev ? (
+            <a
+              href={`/docs/${prev.slug}`}
+              class="group flex flex-col items-start gap-1 min-w-0 flex-1"
+            >
+              <span class="text-xs text-gray-400 dark:text-gray-500 group-hover:text-teal-500 transition-colors">
+                ← Previous
+              </span>
+              <span class="text-sm font-medium text-gray-700 dark:text-gray-300 group-hover:text-teal-600 dark:group-hover:text-teal-400 transition-colors truncate">
+                {prev.title}
+              </span>
+            </a>
+          ) : <div />}
+
+          {next && (
+            <a
+              href={`/docs/${next.slug}`}
+              class="group flex flex-col items-end gap-1 min-w-0 flex-1 text-right"
+            >
+              <span class="text-xs text-gray-400 dark:text-gray-500 group-hover:text-teal-500 transition-colors">
+                Next →
+              </span>
+              <span class="text-sm font-medium text-gray-700 dark:text-gray-300 group-hover:text-teal-600 dark:group-hover:text-teal-400 transition-colors truncate">
+                {next.title}
+              </span>
+            </a>
+          )}
+        </nav>
+      )}
+    </div>
+  </div>
+</BaseLayout>

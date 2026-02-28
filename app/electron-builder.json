@@ -1,0 +1,61 @@
+{
+  "appId": "com.kroy.truss",
+  "productName": "Truss",
+  "directories": {
+    "buildResources": "build",
+    "output": "../release"
+  },
+  "files": [
+    "dist/**/*"
+  ],
+  "extraResources": [
+    {
+      "from": "../backend/bin/${os}/${arch}/",
+      "to": "bin",
+      "filter": ["trussd", "trussd.exe"]
+    },
+    {
+      "from": "build/icon.png",
+      "to": "icon.png"
+    }
+  ],
+  "linux": {
+    "artifactName": "truss-${env.APP_VERSION}-linux-${env.ARCH_LABEL}.AppImage",
+    "icon": "icons",
+    "desktop": {
+      "entry": {
+        "Name": "Truss",
+        "Icon": "truss",
+        "StartupWMClass": "truss"
+      }
+    },
+    "executableName": "truss",
+    "target": [
+      { "target": "AppImage", "arch": ["x64", "arm64"] }
+    ],
+    "category": "Development"
+  },
+  "mac": {
+    "artifactName": "truss-${env.APP_VERSION}-macos-${env.ARCH_LABEL}.${ext}",
+    "icon": "icon.icns",
+    "target": [
+      { "target": "dmg", "arch": ["x64", "arm64"] }
+    ],
+    "category": "public.app-category.developer-tools",
+    "identity": null,
+    "hardenedRuntime": false,
+    "gatekeeperAssess": false
+  },
+  "win": {
+    "artifactName": "truss-${env.APP_VERSION}-windows-${env.ARCH_LABEL}.${ext}",
+    "icon": "icon.ico",
+    "target": [
+      { "target": "nsis", "arch": ["x64", "arm64"] }
+    ]
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true
+  }
+}

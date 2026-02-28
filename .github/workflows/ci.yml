@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  GO_VERSION: "1.25"
+  NODE_VERSION: "22"
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      smoke_relevant: ${{ steps.filter.outputs.smoke_relevant }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            smoke_relevant:
+              - 'app/**'
+              - 'backend/cmd/**'
+              - 'backend/internal/**'
+              - 'backend/api/proto/**'
+              - 'backend/buf.gen.frontend.yaml'
+              - '.github/workflows/ci.yml'
+
+  backend-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: backend/go.sum
+      - name: Backend tests
+        run: cd backend && go test ./...
+
+  frontend-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Frontend unit tests
+        run: cd app && npm ci && npm run test
+
+  frontend-smoke:
+    needs: changes
+    if: needs.changes.outputs.smoke_relevant == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install frontend dependencies
+        run: cd app && npm ci
+      - name: Install Playwright browser
+        run: cd app && npx playwright install --with-deps chromium
+      - name: Frontend smoke tests
+        run: cd app && npm run test:e2e
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            app/playwright-report/
+            app/test-results/
+          if-no-files-found: ignore

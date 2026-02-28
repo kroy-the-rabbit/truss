@@ -1,0 +1,261 @@
+syntax = "proto3";
+
+package truss.v1;
+
+option go_package = "github.com/kroy/truss/backend/api/gen/go/truss/v1;trussv1";
+
+service ResourcesService {
+  rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
+  rpc GetResource(GetResourceRequest) returns (GetResourceResponse);
+  rpc DeleteResource(DeleteResourceRequest) returns (DeleteResourceResponse);
+  rpc ScaleResource(ScaleResourceRequest) returns (ScaleResourceResponse);
+  rpc RestartResource(RestartResourceRequest) returns (RestartResourceResponse);
+  rpc GetResourceCounts(GetResourceCountsRequest) returns (GetResourceCountsResponse);
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+  rpc GetLogs(GetLogsRequest) returns (GetLogsResponse);
+  rpc GetPodInfo(GetPodInfoRequest) returns (GetPodInfoResponse);
+  rpc GetOwnedPods(GetOwnedPodsRequest) returns (GetOwnedPodsResponse);
+  rpc CordonNode(CordonNodeRequest) returns (CordonNodeResponse);
+  rpc UncordonNode(CordonNodeRequest) returns (CordonNodeResponse);
+  rpc DrainNode(DrainNodeRequest) returns (DrainNodeResponse);
+  rpc TriggerCronJob(TriggerCronJobRequest) returns (TriggerCronJobResponse);
+}
+
+message GVR {
+  string group = 1;
+  string version = 2;
+  string resource = 3;  // plural
+}
+
+message ResourceMeta {
+  string name = 1;
+  string namespace = 2;
+  string uid = 3;
+  string creation_timestamp = 4;
+  map<string, string> labels = 5;
+  map<string, string> annotations = 6;
+}
+
+message Condition {
+  string type = 1;
+  string status = 2;
+  string reason = 3;
+  string message = 4;
+  string last_transition = 5;
+}
+
+message SummaryField {
+  string key = 1;
+  string value = 2;
+}
+
+message Resource {
+  ResourceMeta metadata = 1;
+  string kind = 2;
+  string api_version = 3;
+  repeated SummaryField summary = 4;
+  repeated Condition conditions = 5;
+}
+
+message ListResourcesRequest {
+  string context = 1;
+  string namespace = 2;  // empty = all namespaces
+  GVR gvr = 3;
+  string filter = 4;     // name substring filter
+  string sort_field = 5;
+  bool sort_desc = 6;
+  string page_token = 7;
+  int32 limit = 8;
+}
+
+message ListResourcesResponse {
+  repeated Resource resources = 1;
+  string next_page_token = 2;
+  int32 total_count = 3;
+}
+
+message GetResourceRequest {
+  string context = 1;
+  string namespace = 2;
+  GVR gvr = 3;
+  string name = 4;
+}
+
+message GetResourceResponse {
+  Resource resource = 1;
+}
+
+message DeleteResourceRequest {
+  string context = 1;
+  string namespace = 2;
+  GVR gvr = 3;
+  string name = 4;
+  int32 grace_period_seconds = 5;  // -1 = default, 0 = immediate/force
+}
+
+message DeleteResourceResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Events
+message ListEventsRequest {
+  string context = 1;
+  string namespace = 2;
+  string kind = 3;         // involvedObject.kind
+  string name = 4;         // involvedObject.name
+  string uid = 5;          // involvedObject.uid (optional, more precise)
+}
+
+message EventItem {
+  string type = 1;         // Normal, Warning
+  string reason = 2;
+  string message = 3;
+  string source = 4;       // component
+  string first_seen = 5;
+  string last_seen = 6;
+  int32 count = 7;
+  string involved_object = 8; // kind/name
+}
+
+message ListEventsResponse {
+  repeated EventItem events = 1;
+}
+
+// Logs
+message GetLogsRequest {
+  string context = 1;
+  string namespace = 2;
+  string pod = 3;
+  string container = 4;    // empty = default container
+  bool previous = 5;
+  int32 tail_lines = 6;    // 0 = all
+  bool timestamps = 7;
+  string since_seconds = 8; // e.g. "3600" for last hour
+}
+
+message ContainerInfo {
+  string name = 1;
+  string state = 2;       // running, waiting, terminated
+  string reason = 3;      // e.g. CrashLoopBackOff, Completed
+  bool ready = 4;
+  int32 restart_count = 5;
+  bool is_init = 6;
+  string image = 7;
+  string started_at = 8;
+  string finished_at = 9;
+  string message = 10;
+}
+
+message GetLogsResponse {
+  string logs = 1;
+  repeated string containers = 2; // available container names (kept for compat)
+  repeated ContainerInfo container_infos = 3;
+  string pod_phase = 4;
+}
+
+// Pod info (containers + state, no log fetching)
+message GetPodInfoRequest {
+  string context = 1;
+  string namespace = 2;
+  string pod = 3;
+}
+
+message GetPodInfoResponse {
+  string pod_phase = 1;
+  string pod_ip = 2;
+  string node_name = 3;
+  string qos_class = 4;
+  repeated ContainerInfo containers = 5;
+}
+
+// Scale
+message ScaleResourceRequest {
+  string context = 1;
+  string namespace = 2;
+  GVR gvr = 3;
+  string name = 4;
+  int32 replicas = 5;
+}
+
+message ScaleResourceResponse {
+  bool success = 1;
+  string message = 2;
+  int32 previous_replicas = 3;
+  int32 current_replicas = 4;
+}
+
+// Restart
+message RestartResourceRequest {
+  string context = 1;
+  string namespace = 2;
+  GVR gvr = 3;
+  string name = 4;
+}
+
+message RestartResourceResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Resource Counts
+message ResourceCount {
+  GVR gvr = 1;
+  int32 count = 2;
+}
+
+message GetResourceCountsRequest {
+  string context = 1;
+  string namespace = 2;
+  repeated GVR gvrs = 3;
+}
+
+message GetResourceCountsResponse {
+  repeated ResourceCount counts = 1;
+}
+
+// Owned Pods
+message GetOwnedPodsRequest {
+  string context = 1;
+  string namespace = 2;
+  string kind = 3;
+  string name = 4;
+}
+
+message GetOwnedPodsResponse {
+  repeated Resource pods = 1;
+}
+
+message CordonNodeRequest {
+  string context = 1;
+  string name = 2;
+}
+
+message CordonNodeResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message DrainNodeRequest {
+  string context = 1;
+  string name = 2;
+  bool ignore_daemonsets = 3;
+}
+
+message DrainNodeResponse {
+  bool success = 1;
+  string message = 2;
+  int32 evicted_count = 3;
+}
+
+message TriggerCronJobRequest {
+  string context = 1;
+  string namespace = 2;
+  string name = 3;
+}
+
+message TriggerCronJobResponse {
+  bool success = 1;
+  string job_name = 2;
+  string message = 3;
+}

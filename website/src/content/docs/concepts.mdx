@@ -1,0 +1,89 @@
+---
+title: Concepts
+description: Core Truss concepts — vault, profiles, RO/Write mode, the three-pane layout, and session windows.
+order: 3
+---
+
+import Callout from '@/components/Callout.astro';
+
+## Encrypted Vault
+
+All Kubernetes credentials (kubeconfigs) and profile metadata are stored in an **encrypted local vault** (`contexts.enc`). The vault is unlocked at startup with either:
+
+- **Password mode** — AES-256-GCM, key derived with Argon2id
+- **GPG mode** — encrypted with your local GPG key or hardware token
+
+The backend daemon (`trussd`) holds the decrypted state in memory only while the app is running. Locking the vault stops all active sessions.
+
+## Profiles
+
+A **profile** is a named collection of contexts with an optional color label. Use profiles to separate environments:
+
+- **production** (red label) — your live clusters
+- **staging** (yellow label) — pre-production
+- **dev** (blue label) — local / development clusters
+
+Profiles make it visually obvious which environment is active before taking any action.
+
+## Read-Only and Write Mode
+
+Truss defaults to **RO (Read-Only) mode**. In RO mode:
+
+- Mutations (delete, scale, apply YAML, restart, Helm rollback/uninstall) are blocked
+- The UI clearly indicates RO state
+- Inspector actions for mutations are disabled
+
+**Write mode** is a deliberate, visually prominent toggle (`Cmd/Ctrl+Shift+M`). Always verify your active context and namespace before enabling Write mode.
+
+<Callout type="tip">
+  Use separate profiles for prod vs non-prod and label production clusters red. The visual confirmation is worth it.
+</Callout>
+
+## The Three-Pane Layout
+
+| Pane | Role |
+|------|------|
+| **Navigator** | Namespace + resource kind tree |
+| **Resource List** | Filtered list of resources for the selected kind |
+| **Inspector** | Detail view: Summary, Data/Form, YAML, Events |
+
+Panes have draggable splitters. Focus moves between panes with `Tab` / `Shift+Tab` or `Cmd/Ctrl+1` / `Cmd/Ctrl+2`.
+
+## Session Windows
+
+Long-running operations open in **popout session windows** that persist independently of the main window:
+
+| Window | Trigger | Purpose |
+|--------|---------|---------|
+| **Logs** | `Cmd/Ctrl+Shift+L` | Streaming pod/container logs with filter |
+| **Exec** | `Cmd/Ctrl+Shift+T` | Interactive terminal over WebSocket |
+| **File Transfer** | Inspector action | Upload/download files in a container |
+| **Port Forward** | Inspector action | Managed port-forward lifecycle |
+
+## Global Search and Command Palette
+
+Press `Cmd/Ctrl+P`, `Cmd/Ctrl+K`, or `/` to open the **command palette**. It searches across:
+- Resource names (all namespaces, all kinds)
+- Context and namespace names
+- Commands
+
+Results update as you type with async indexing.
+
+## Cluster Overview
+
+**◈ Overview** (always first in the navigator) provides:
+- Live node readiness counts
+- Pod phase breakdown
+- Recent Kubernetes warning events (normalized and deduplicatable)
+- Cache warm-up progress indicator
+
+## Plugin System
+
+Truss has a privileged plugin model for extending the UI. Plugins can:
+- Register custom tree sections and inspectors
+- Read/write local storage and encrypted secure storage
+- Apply custom themes
+
+<Callout type="warning">
+  Plugin code runs with privileged access in the app process. Only install plugins from trusted sources.
+</Callout>

@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package truss.v1;
+
+option go_package = "github.com/kroy/truss/backend/api/gen/go/truss/v1;trussv1";
+
+service OverviewService {
+  rpc GetClusterOverview(GetClusterOverviewRequest) returns (GetClusterOverviewResponse);
+}
+
+message GetClusterOverviewRequest {
+  string context   = 1;
+  string namespace = 2; // "" = all namespaces
+}
+
+message GetClusterOverviewResponse {
+  NodeSummary     nodes         = 1;
+  PodSummary      pods          = 2;
+  WorkloadSummary deployments   = 3;
+  WorkloadSummary stateful_sets = 4;
+  WorkloadSummary daemon_sets   = 5;
+  repeated OverviewEvent recent_warnings = 6;
+  bool cache_warm         = 7; // false = informers not yet fully synced; data is best-effort
+  bool metrics_available  = 8; // false = metrics-server not installed
+  repeated PodTopEntry top_cpu_pods = 9;  // top 10 pods by CPU
+  repeated PodTopEntry top_mem_pods = 10; // top 10 pods by memory
+}
+
+message NodeSummary {
+  int32 total     = 1;
+  int32 ready     = 2;
+  int32 not_ready = 3;
+  repeated NodeMetric metrics = 4; // per-node CPU/mem; empty if metrics-server absent
+}
+
+// Per-node CPU and memory usage from metrics-server.
+message NodeMetric {
+  string name            = 1;
+  int64  cpu_used_m      = 2; // millicores (e.g. 250 = 250m)
+  int64  cpu_alloc_m     = 3; // allocatable millicores from node spec
+  int64  mem_used_bytes  = 4;
+  int64  mem_alloc_bytes = 5;
+}
+
+// Top pod by resource consumption.
+message PodTopEntry {
+  string namespace = 1;
+  string name      = 2;
+  int64  cpu_m     = 3; // millicores
+  int64  mem_bytes = 4;
+}
+
+message PodSummary {
+  int32 running   = 1;
+  int32 pending   = 2;
+  int32 failed    = 3;
+  int32 succeeded = 4;
+  int32 unknown   = 5;
+}
+
+message WorkloadSummary {
+  int32 total     = 1;
+  int32 ready     = 2;
+  int32 not_ready = 3;
+  int32 updating  = 4; // observedGeneration != generation
+}
+
+message OverviewEvent {
+  string namespace     = 1;
+  string involved_kind = 2;
+  string involved_name = 3;
+  string reason        = 4;
+  string message       = 5;
+  string last_time     = 6;
+  int32  count         = 7;
+}

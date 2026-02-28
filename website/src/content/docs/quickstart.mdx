@@ -1,0 +1,86 @@
+---
+title: Quickstart
+description: Connect to your first cluster and start navigating resources in minutes.
+order: 2
+---
+
+import Callout from '@/components/Callout.astro';
+
+This guide assumes you have [installed Truss](/docs/installation) and have a valid `~/.kube/config`.
+
+## 1. Initialize the Vault
+
+On first launch, Truss prompts you to set up an encrypted vault.
+
+Choose a mode:
+- **Password** — Argon2id-derived key, ideal for portable local use
+- **GPG** — encrypts with your local GPG key or hardware token
+
+Your kubeconfigs and profile metadata are stored encrypted at rest in this vault.
+
+## 2. Import Contexts
+
+After vault setup, import your Kubernetes contexts:
+
+- **Auto-import** from `~/.kube/config` (Truss detects it automatically)
+- **Paste** a raw kubeconfig YAML directly
+
+Each context becomes a selectable entry in Truss. You can group contexts into **Profiles** and color-label them (e.g. red for production, blue for staging).
+
+## 3. Stay in Read-Only Mode
+
+<Callout type="warning">
+  Truss defaults to **RO (Read-Only) mode**. Mutating actions are blocked until you explicitly toggle to **Write mode** (`Cmd/Ctrl+Shift+M`).
+</Callout>
+
+Always confirm your active context and namespace before enabling Write mode, especially on production clusters.
+
+## 4. Navigate the Three-Pane Interface
+
+```
+┌─────────────────┬──────────────────┬─────────────────────┐
+│  Navigator      │  Resource List   │  Inspector          │
+│                 │                  │                     │
+│  Namespaces     │  pod-abc-123      │  Summary / Events   │
+│  Workloads      │  pod-def-456      │  YAML / Data        │
+│  Services       │  pod-ghi-789      │  Logs / Exec        │
+│  …              │  …               │  …                  │
+└─────────────────┴──────────────────┴─────────────────────┘
+```
+
+| Pane | Focus shortcut |
+|------|---------------|
+| Navigator | `Cmd/Ctrl+1` |
+| Inspector | `Cmd/Ctrl+2` |
+| Cycle panes | `Tab` / `Shift+Tab` |
+
+## 5. Open the Overview
+
+Click **◈ Overview** in the left navigator to see:
+- Node readiness and pod phase breakdown
+- Warning events from your cluster
+- Workload health summaries
+
+## 6. Open a Pod Shell
+
+1. Navigate to **Workloads → Pods**
+2. Select a pod in the resource list
+3. Press `Cmd/Ctrl+Shift+T` — an exec terminal opens in a popout window
+
+## 7. Tail Logs
+
+1. Select any pod or workload
+2. Press `Cmd/Ctrl+Shift+L` — a streaming log window opens
+3. Use `Cmd/Ctrl+F` to filter log lines
+
+## Common Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `?` | Open shortcuts reference |
+| `Cmd/Ctrl+P` or `/` | Open command palette / global search |
+| `Cmd/Ctrl+Shift+M` | Toggle RO / Write mode |
+| `↑ / ↓` | Navigate resource list |
+| `Enter` | Open resource in inspector |
+
+Press `?` at any time for the full interactive shortcut reference.

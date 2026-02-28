@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="64" height="64">
+  <defs>
+    <clipPath id="c"><rect x="64" y="64" width="896" height="896" rx="200" ry="200"/></clipPath>
+    <pattern id="p" patternUnits="userSpaceOnUse" width="220" height="220">
+      <path d="M0,220 L220,0" stroke="#006B6B" stroke-width="36" stroke-linecap="round" opacity=".95"/>
+      <path d="M0,0 L220,220" stroke="#006B6B" stroke-width="36" stroke-linecap="round" opacity=".95"/>
+      <path d="M-20,110 L240,110" stroke="#005F5F" stroke-width="28" stroke-linecap="round" opacity=".95"/>
+    </pattern>
+    <path id="T" d="M170 210H854Q890 210 890 246V332Q890 368 854 368H642V804Q642 860 586 860H438Q382 860 382 804V368H170Q134 368 134 332V246Q134 210 170 210Z"/>
+  </defs>
+  <g clip-path="url(#c)">
+    <rect x="64" y="64" width="896" height="896" fill="#00A3A3"/>
+    <rect x="64" y="360" width="896" height="320" fill="#009393"/>
+    <rect x="64" y="360" width="896" height="320" fill="url(#p)" opacity=".95"/>
+    <rect x="64" y="820" width="896" height="120" fill="#008888" opacity=".95"/>
+    <g opacity=".95" transform="translate(0,18)">
+      <use href="#T" fill="#005E5E" opacity=".85"/>
+    </g>
+    <use href="#T" fill="#00A8A8"/>
+    <use href="#T" fill="none" stroke="#FFF" stroke-width="44" stroke-linejoin="round"/>
+    <path d="M420 808H604Q620 808 620 824V844Q620 860 604 860H420Q404 860 404 844V824Q404 808 420 808Z" fill="#005A5A" opacity=".9"/>
+  </g>
+</svg>

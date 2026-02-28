@@ -1,0 +1,358 @@
+stages:
+  - test
+  - build
+  - package
+  - upload
+
+variables:
+  GO_VERSION: "1.25"
+  NODE_VERSION: "22"
+
+# --- Test ---
+
+test:backend:
+  stage: test
+  image: golang:${GO_VERSION}
+  script:
+    - cd backend && go test ./...
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+test:frontend:unit:
+  stage: test
+  image: node:${NODE_VERSION}
+  script:
+    - cd app && npm ci && npm run test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+test:frontend:smoke:
+  stage: test
+  image: mcr.microsoft.com/playwright:v1.58.2-jammy
+  script:
+    - cd app && npm ci && npm run test:e2e
+  artifacts:
+    when: always
+    paths:
+      - app/playwright-report/
+      - app/test-results/
+    expire_in: 7 days
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# --- Build Go backends ---
+
+.build-backend:
+  stage: build
+  image: golang:${GO_VERSION}
+  script:
+    - |
+      cd backend
+      mkdir -p bin/${EB_OS}/${EB_ARCH}
+      CGO_ENABLED=0 GOOS=${GOOS} GOARCH=${GOARCH} \
+        go build -buildvcs=false -trimpath \
+        -ldflags="-s -w -X main.version=${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}" \
+        -o bin/${EB_OS}/${EB_ARCH}/trussd${EXT} ./cmd/trussd
+  artifacts:
+    paths:
+      - backend/bin/${EB_OS}/${EB_ARCH}/
+    expire_in: 1 hour
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+build:backend:linux-x64:
+  extends: .build-backend
+  variables:
+    GOOS: linux
+    GOARCH: amd64
+    EB_OS: linux
+    EB_ARCH: x64
+    EXT: ""
+
+build:backend:linux-arm64:
+  extends: .build-backend
+  variables:
+    GOOS: linux
+    GOARCH: arm64
+    EB_OS: linux
+    EB_ARCH: arm64
+    EXT: ""
+
+build:backend:mac-x64:
+  extends: .build-backend
+  variables:
+    GOOS: darwin
+    GOARCH: amd64
+    EB_OS: mac
+    EB_ARCH: x64
+    EXT: ""
+
+build:backend:mac-arm64:
+  extends: .build-backend
+  variables:
+    GOOS: darwin
+    GOARCH: arm64
+    EB_OS: mac
+    EB_ARCH: arm64
+    EXT: ""
+
+build:backend:win-x64:
+  extends: .build-backend
+  variables:
+    GOOS: windows
+    GOARCH: amd64
+    EB_OS: win
+    EB_ARCH: x64
+    EXT: ".exe"
+
+build:backend:win-arm64:
+  extends: .build-backend
+  variables:
+    GOOS: windows
+    GOARCH: arm64
+    EB_OS: win
+    EB_ARCH: arm64
+    EXT: ".exe"
+
+# --- Build frontend ---
+
+build:frontend:gen-api:
+  stage: build
+  image: bufbuild/buf:latest
+  script:
+    - cd backend && buf generate --template buf.gen.frontend.yaml
+  artifacts:
+    paths:
+      - app/src/renderer/api/gen/
+    expire_in: 1 hour
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+build:frontend:
+  stage: build
+  image: node:${NODE_VERSION}
+  needs:
+    - job: build:frontend:gen-api
+      artifacts: true
+  script:
+    - |
+      if [ -n "${CI_COMMIT_TAG}" ]; then
+        npm --prefix app version --no-git-tag-version "${CI_COMMIT_TAG}"
+      fi
+    - cd app && npm ci && npm run build
+  artifacts:
+    paths:
+      - app/dist/
+    expire_in: 1 hour
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# --- Generate icon ---
+
+build:icon:
+  stage: build
+  image: ubuntu:24.04
+  script:
+    - apt-get update && apt-get install -y librsvg2-bin
+    - mkdir -p app/build
+    - rsvg-convert -w 1024 -h 1024 -o app/build/icon.png assets/truss.svg
+  artifacts:
+    paths:
+      - app/build/icon.png
+    expire_in: 1 hour
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# --- Package Linux AppImages ---
+
+.package-linux:
+  stage: package
+  image: electronuserland/builder:latest
+  needs:
+    - build:frontend
+    - build:icon
+  script:
+    - chmod +x backend/bin/linux/${EB_ARCH}/trussd
+    - cd app && npm ci
+    - |
+      if [ "${EB_ARCH}" = "x64" ]; then
+        export ARCH_LABEL=amd64
+      else
+        export ARCH_LABEL="${EB_ARCH}"
+      fi
+      export APP_VERSION="${CI_COMMIT_TAG}"
+      cd app && npx electron-builder --linux AppImage --${EB_ARCH} --publish=never
+  artifacts:
+    paths:
+      - release/*.AppImage
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_TAG
+
+package:linux-x64:
+  extends: .package-linux
+  needs:
+    - build:frontend
+    - build:icon
+    - build:backend:linux-x64
+  variables:
+    EB_ARCH: x64
+
+package:linux-arm64:
+  extends: .package-linux
+  needs:
+    - build:frontend
+    - build:icon
+    - build:backend:linux-arm64
+  variables:
+    EB_ARCH: arm64
+
+# --- Package macOS DMG ---
+# Requires a macOS runner. On gitlab.com SaaS, use the saas-macos-medium-m1 tag.
+# For self-hosted, tag your macOS runner with "macos".
+
+.package-mac:
+  stage: package
+  tags:
+    - saas-macos-medium-m1
+  needs:
+    - build:frontend
+    - build:icon
+  before_script:
+    - brew install node@${NODE_VERSION} || true
+    - export PATH="$(brew --prefix node@${NODE_VERSION})/bin:$PATH"
+  script:
+    - chmod +x backend/bin/mac/${EB_ARCH}/trussd
+    - cd app && npm ci
+    - |
+      if [ "${EB_ARCH}" = "x64" ]; then
+        export ARCH_LABEL=intel
+      else
+        export ARCH_LABEL="${EB_ARCH}"
+      fi
+      export APP_VERSION="${CI_COMMIT_TAG}"
+      cd app && npx electron-builder --mac dir --${EB_ARCH} --publish=never
+    # Ad-hoc codesign the .app bundle so macOS allows it to run
+    - |
+      APP_PATH=$(find release -name "*.app" -type d | head -1)
+      echo "Signing $APP_PATH"
+      find "$APP_PATH" -name trussd -type f -exec codesign --force --deep -s - {} \;
+      find "$APP_PATH" -name "*.app" -type d -exec codesign --force --deep -s - {} \;
+      find "$APP_PATH" -type f \( -name "*.dylib" -o -name "*.so" \) -exec codesign --force -s - {} \;
+      codesign --force --deep -s - "$APP_PATH"
+      codesign --verify --deep --verbose "$APP_PATH" 2>&1 || true
+    # Create DMG from signed .app
+    - |
+      DMG_NAME="truss-${CI_COMMIT_TAG}-macos-${ARCH_LABEL}.dmg"
+      APP_PATH=$(find release -name "*.app" -type d | head -1)
+      hdiutil create -volname "Truss" -srcfolder "$APP_PATH" \
+        -ov -format UDZO "release/${DMG_NAME}"
+  artifacts:
+    paths:
+      - release/*.dmg
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_TAG
+
+package:mac-x64:
+  extends: .package-mac
+  needs:
+    - build:frontend
+    - build:icon
+    - build:backend:mac-x64
+  variables:
+    EB_ARCH: x64
+
+package:mac-arm64:
+  extends: .package-mac
+  needs:
+    - build:frontend
+    - build:icon
+    - build:backend:mac-arm64
+  variables:
+    EB_ARCH: arm64
+
+# --- Package Windows NSIS ---
+# Requires a Windows runner tagged "windows".
+
+.package-win:
+  stage: package
+  tags:
+    - windows
+  needs:
+    - build:frontend
+    - build:icon
+  before_script:
+    - node --version
+    - npm --version
+  script:
+    - npm --prefix app ci
+    - |
+      if ($env:EB_ARCH -eq "x64") {
+        $env:ARCH_LABEL = "amd64"
+      } else {
+        $env:ARCH_LABEL = $env:EB_ARCH
+      }
+      $env:APP_VERSION = $env:CI_COMMIT_TAG
+      Push-Location app
+      npx electron-builder --win nsis --$env:EB_ARCH --publish=never
+      Pop-Location
+  artifacts:
+    paths:
+      - release/*.exe
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_TAG
+
+package:win-x64:
+  extends: .package-win
+  needs:
+    - build:frontend
+    - build:icon
+    - build:backend:win-x64
+  variables:
+    EB_ARCH: x64
+
+package:win-arm64:
+  extends: .package-win
+  needs:
+    - build:frontend
+    - build:icon
+    - build:backend:win-arm64
+  variables:
+    EB_ARCH: arm64
+
+# --- Upload to GitLab Generic Package Registry on tags ---
+
+upload:registry:
+  stage: upload
+  image: curlimages/curl:latest
+  needs:
+    - package:linux-x64
+    - package:linux-arm64
+    - package:mac-x64
+    - package:mac-arm64
+    - package:win-x64
+    - package:win-arm64
+  rules:
+    - if: $CI_COMMIT_TAG
+  allow_failure: true
+  script:
+    - |
+      for file in release/*.AppImage release/*.dmg release/*.exe; do
+        [ -f "$file" ] || continue
+        filename=$(basename "$file")
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+             --upload-file "$file" \
+             "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/truss/${CI_COMMIT_TAG}/${filename}"
+      done

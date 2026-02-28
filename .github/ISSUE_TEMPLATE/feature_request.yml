@@ -1,0 +1,52 @@
+name: Feature request
+description: Suggest an improvement to Truss.
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Focus on the user outcome and tradeoffs.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What user problem or workflow pain does this address?
+      placeholder: Today it's hard to ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      placeholder: Add/Change ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      placeholder: We could also ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and impact
+      description: Mention affected areas (UI panes, exec/logs, plugins, release pipeline, etc).
+      placeholder: Affects YAML tab and release docs ...
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I can help implement this.
+          required: false

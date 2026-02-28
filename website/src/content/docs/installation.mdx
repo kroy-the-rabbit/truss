@@ -1,0 +1,111 @@
+---
+title: Installation
+description: Download, verify, and install Truss on Linux, macOS, or Windows.
+order: 1
+---
+
+import Callout from '@/components/Callout.astro';
+
+Truss ships as a self-contained desktop binary — no cluster-side install required.
+
+## Download
+
+Get the latest release from **[GitHub Releases](https://github.com/kroy-the-rabbit/truss/releases/latest)**.
+
+| Platform | Architecture | Artifact |
+|----------|-------------|---------|
+| Linux    | x64         | `truss-<version>-linux-amd64.AppImage` |
+| Linux    | arm64       | `truss-<version>-linux-arm64.AppImage` |
+| macOS    | Intel (x64) | `truss-<version>-macos-intel.dmg` |
+| macOS    | Apple Silicon (arm64) | `truss-<version>-macos-arm64.dmg` |
+| Windows  | x64         | `truss-<version>-windows-amd64.exe` |
+| Windows  | arm64       | `truss-<version>-windows-arm64.exe` |
+
+## Verify Release Artifacts
+
+Verification is strongly recommended for production installs.
+
+```bash
+# Import the release signing key bundled in the repo
+gpg --import KEYS
+
+# Optional: check the fingerprint
+gpg --fingerprint CD786AF6C8054E3630457321899FF2FEE3CD9D96
+
+# Verify the signed checksum manifest
+gpg --verify SHA256SUMS.asc SHA256SUMS
+
+# Verify artifact checksums
+sha256sum -c SHA256SUMS          # Linux
+shasum -a 256 -c SHA256SUMS     # macOS
+```
+
+## Install
+
+### Linux (AppImage)
+
+```bash
+chmod +x truss-<version>-linux-amd64.AppImage
+./truss-<version>-linux-amd64.AppImage
+```
+
+<Callout type="tip">
+  Place the AppImage in `~/Applications/` and create a `.desktop` entry for launcher integration.
+</Callout>
+
+### macOS (DMG)
+
+1. Open the `.dmg`
+2. Drag **Truss.app** to `Applications`
+3. Launch **Truss**
+
+If Gatekeeper blocks first launch:
+
+```bash
+xattr -cr /Applications/Truss.app
+```
+
+Then right-click → **Open**.
+
+### Windows (NSIS Installer)
+
+1. Run `truss-<version>-windows-amd64.exe`
+2. Choose an install path
+3. Launch Truss from Start Menu
+
+## First Run
+
+1. **Initialize the vault** — choose `password` or `gpg` mode
+2. **Import contexts** — from `~/.kube/config` or paste kubeconfig YAML
+3. **Confirm active profile / context**
+4. **Stay in `RO` mode** while validating access
+5. Open **Overview** to confirm cluster connectivity
+
+## Upgrade
+
+User data lives in `~/.config/truss/` (Linux/macOS) or `%AppData%\truss\` (Windows) — separate from the binary — so upgrades are in-place:
+
+1. Close Truss
+2. Install the new release
+3. Launch and verify vault unlock
+
+<Callout type="warning">
+  Back up `contexts.enc` and `preferences.json` before major version upgrades.
+</Callout>
+
+## Uninstall
+
+**Binaries:**
+- Linux: delete the AppImage file
+- macOS: remove `Truss.app` from Applications
+- Windows: uninstall via Settings → Apps
+
+**User data (optional, destructive):**
+
+```bash
+# Linux / macOS
+rm -rf ~/.config/truss/
+
+# Windows (PowerShell)
+Remove-Item -Recurse "$env:APPDATA\truss"
+```

@@ -1,0 +1,32 @@
+---
+interface Props {
+  type?: 'note' | 'warning' | 'tip';
+  title?: string;
+}
+const { type = 'note', title } = Astro.props;
+
+const icons = {
+  note:    '◉',
+  warning: '⚠',
+  tip:     '✦',
+};
+const defaultTitles = {
+  note:    'Note',
+  warning: 'Warning',
+  tip:     'Tip',
+};
+---
+
+<div class={`callout callout-${type} my-6`} role="note">
+  <span class="text-lg leading-none mt-0.5 shrink-0" aria-hidden="true">{icons[type]}</span>
+  <div class="flex-1 min-w-0">
+    {(title || defaultTitles[type]) && (
+      <p class="font-semibold mb-1 text-[0.8rem] uppercase tracking-wide opacity-70">
+        {title ?? defaultTitles[type]}
+      </p>
+    )}
+    <div class="[&>p:last-child]:mb-0 [&>p]:mb-1">
+      <slot />
+    </div>
+  </div>
+</div>

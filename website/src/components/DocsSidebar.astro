@@ -1,0 +1,64 @@
+---
+import { docsNav } from '@/lib/nav';
+const { currentSlug } = Astro.props as { currentSlug: string };
+---
+
+<aside
+  id="docs-sidebar"
+  class="w-64 shrink-0 hidden lg:block"
+  aria-label="Documentation navigation"
+>
+  <nav class="sticky top-20 max-h-[calc(100vh-5rem)] overflow-y-auto pr-2 pb-8">
+    {docsNav.map(group => (
+      <div class="mb-6">
+        <h2 class="px-3 mb-1.5 text-[0.7rem] font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500">
+          {group.section}
+        </h2>
+        <ul class="space-y-0.5">
+          {group.items.map(item => {
+            const active = item.slug === currentSlug;
+            return (
+              <li>
+                <a
+                  href={`/docs/${item.slug}`}
+                  aria-current={active ? 'page' : undefined}
+                  class={[
+                    'block px-3 py-1.5 rounded-md text-sm transition-colors',
+                    active
+                      ? 'bg-teal-50 dark:bg-teal-950 text-teal-700 dark:text-teal-300 font-medium'
+                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800',
+                  ].join(' ')}
+                >
+                  {item.title}
+                </a>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    ))}
+  </nav>
+</aside>
+
+<!-- Mobile nav pill (top of docs page on mobile) -->
+<div class="lg:hidden mb-6">
+  <div class="flex flex-wrap gap-2">
+    {docsNav.flatMap(g => g.items).map(item => {
+      const active = item.slug === currentSlug;
+      return (
+        <a
+          href={`/docs/${item.slug}`}
+          aria-current={active ? 'page' : undefined}
+          class={[
+            'px-3 py-1 rounded-full text-xs font-medium border transition-colors',
+            active
+              ? 'border-teal-500 bg-teal-50 dark:bg-teal-950 text-teal-700 dark:text-teal-300'
+              : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:border-teal-400',
+          ].join(' ')}
+        >
+          {item.title}
+        </a>
+      );
+    })}
+  </div>
+</div>

@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-primary: 0 163 163;
+    scroll-behavior: smooth;
+  }
+
+  html {
+    @apply antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  ::selection {
+    @apply bg-teal-100 text-teal-900;
+  }
+
+  .dark ::selection {
+    @apply bg-teal-900 text-teal-100;
+  }
+}
+
+@layer components {
+  /* Shiki code block overrides */
+  .astro-code {
+    @apply rounded-xl text-sm leading-relaxed overflow-x-auto;
+    padding: 1.25rem 1.5rem !important;
+  }
+
+  /* Inline code in prose */
+  .prose :not(pre) > code {
+    @apply bg-gray-100 dark:bg-gray-800 text-teal-700 dark:text-teal-300
+           rounded px-1.5 py-0.5 text-[0.875em] font-mono font-medium;
+  }
+
+  /* Doc callout variants */
+  .callout {
+    @apply flex gap-3 rounded-xl border p-4 text-sm;
+  }
+  .callout-note {
+    @apply callout border-teal-200 bg-teal-50 text-teal-900
+           dark:border-teal-800 dark:bg-teal-950 dark:text-teal-100;
+  }
+  .callout-warning {
+    @apply callout border-amber-200 bg-amber-50 text-amber-900
+           dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100;
+  }
+  .callout-tip {
+    @apply callout border-emerald-200 bg-emerald-50 text-emerald-900
+           dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-100;
+  }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { @apply bg-transparent; }
+::-webkit-scrollbar-thumb { @apply bg-gray-300 dark:bg-gray-700 rounded-full; }
+::-webkit-scrollbar-thumb:hover { @apply bg-gray-400 dark:bg-gray-600; }

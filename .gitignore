@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+app/node_modules/
+
+# Build outputs
+dist/
+out/
+backend/trussd
+backend/trussd.exe
+backend/kubed
+backend/kubed.exe
+backend/bin/
+app/dist/
+.cache
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Electron
+release/
+*.asar
+.claude/
+build-notes.txt
+*review-notes*
+app/playwright-report/
+app/test-results/
+app/coverage/
+memory/
+todo.txt

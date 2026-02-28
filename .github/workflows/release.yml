@@ -1,0 +1,447 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: "1.25"
+  NODE_VERSION: "22"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: backend/go.sum
+      - run: cd backend && go test ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Frontend unit tests
+        run: cd app && npm ci && npm run test
+      - name: Install Playwright browser
+        run: cd app && npx playwright install --with-deps chromium
+      - name: Frontend smoke tests
+        run: cd app && npm run test:e2e
+
+  build-backend:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            eb_os: linux
+            eb_arch: x64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            eb_os: linux
+            eb_arch: arm64
+            ext: ""
+          - goos: darwin
+            goarch: amd64
+            eb_os: mac
+            eb_arch: x64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            eb_os: mac
+            eb_arch: arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            eb_os: win
+            eb_arch: x64
+            ext: ".exe"
+          - goos: windows
+            goarch: arm64
+            eb_os: win
+            eb_arch: arm64
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: backend/go.sum
+      - name: Build backend
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          cd backend
+          mkdir -p bin/${{ matrix.eb_os }}/${{ matrix.eb_arch }}
+          go build -trimpath -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o bin/${{ matrix.eb_os }}/${{ matrix.eb_arch }}/trussd${{ matrix.ext }} ./cmd/trussd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-${{ matrix.eb_os }}-${{ matrix.eb_arch }}
+          path: backend/bin/${{ matrix.eb_os }}/${{ matrix.eb_arch }}/
+
+  build-frontend:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
+      - name: Generate frontend API stubs
+        run: cd backend && buf generate --template buf.gen.frontend.yaml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Generate icons from canonical SVG
+        run: |
+          sudo apt-get update && sudo apt-get install -y librsvg2-bin
+          cd app && bash scripts/generate-icons.sh
+      - name: Set version in package.json
+        run: npm --prefix app version --allow-same-version --no-git-tag-version ${{ github.ref_name }}
+      - run: cd app && npm ci && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: app/dist/
+
+  build-icon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate icon assets from canonical SVG
+        run: |
+          sudo apt-get update && sudo apt-get install -y librsvg2-bin
+          cd app && bash scripts/generate-icons.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: icon
+          path: |
+            app/build/icon.png
+            app/build/icons/
+
+  package-linux:
+    needs: [build-backend, build-frontend, build-icon]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: backend-linux-${{ matrix.arch }}
+          path: backend/bin/linux/${{ matrix.arch }}/
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: app/dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: icon
+          path: app/build/
+      - name: Set version in package.json
+        run: npm --prefix app version --allow-same-version --no-git-tag-version ${{ github.ref_name }}
+      - name: Make backend binary executable
+        run: chmod +x backend/bin/linux/${{ matrix.arch }}/trussd
+      - run: cd app && npm ci
+      - run: |
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            export ARCH_LABEL=amd64
+          else
+            export ARCH_LABEL=${{ matrix.arch }}
+          fi
+          export APP_VERSION=${{ github.ref_name }}
+          cd app && npx electron-builder --linux AppImage --${{ matrix.arch }} --publish=never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage-${{ matrix.arch }}
+          path: release/*.AppImage
+
+  package-mac:
+    needs: [build-backend, build-frontend, build-icon]
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: backend-mac-${{ matrix.arch }}
+          path: backend/bin/mac/${{ matrix.arch }}/
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: app/dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: icon
+          path: app/build/
+      - name: Set version in package.json
+        run: npm --prefix app version --allow-same-version --no-git-tag-version ${{ github.ref_name }}
+      - name: Make backend binary executable
+        run: chmod +x backend/bin/mac/${{ matrix.arch }}/trussd
+      - run: cd app && npm ci
+      - name: Build .app bundle
+        run: |
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            export ARCH_LABEL=intel
+          else
+            export ARCH_LABEL=${{ matrix.arch }}
+          fi
+          export APP_VERSION=${{ github.ref_name }}
+          cd app && npx electron-builder --mac dir --${{ matrix.arch }} --publish=never
+      - name: Detect macOS signing/notarization secret availability
+        id: mac_signing_mode
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE_P12_BASE64" ] && \
+             [ -n "$APPLE_CERTIFICATE_PASSWORD" ] && \
+             [ -n "$APPLE_TEAM_ID" ] && \
+             [ -n "$APPLE_API_KEY_P8_BASE64" ] && \
+             [ -n "$APPLE_API_KEY_ID" ] && \
+             [ -n "$APPLE_API_ISSUER_ID" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Import Developer ID certificate (optional)
+        if: ${{ steps.mac_signing_mode.outputs.enabled == 'true' }}
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/truss-signing.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/truss-signing.p12"
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "" "$KEYCHAIN"
+          security import "$CERT_PATH" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          echo "TRUSS_SIGNING_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+      - name: Sign .app with Developer ID (when secrets are present)
+        if: ${{ steps.mac_signing_mode.outputs.enabled == 'true' }}
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          APP_PATH=$(find release -name "*.app" -type d | head -1)
+          echo "Signing $APP_PATH"
+          IDENTITY=$(security find-identity -v -p codesigning "$TRUSS_SIGNING_KEYCHAIN" | sed -n 's/.*"\(Developer ID Application:.*\)".*/\1/p' | head -1)
+          if [ -z "$IDENTITY" ]; then
+            echo "Developer ID identity not found in keychain"
+            exit 1
+          fi
+          # Sign embedded binaries first, then app bundle.
+          find "$APP_PATH" -name trussd -type f -exec codesign --force --options runtime --timestamp --sign "$IDENTITY" {} \;
+          find "$APP_PATH" -name "*.app" -type d -exec codesign --force --options runtime --timestamp --sign "$IDENTITY" {} \;
+          find "$APP_PATH" -type f \( -name "*.dylib" -o -name "*.so" \) -exec codesign --force --options runtime --timestamp --sign "$IDENTITY" {} \;
+          codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+      - name: Ad-hoc codesign .app bundle (fallback)
+        if: ${{ steps.mac_signing_mode.outputs.enabled != 'true' }}
+        run: |
+          APP_PATH=$(find release -name "*.app" -type d | head -1)
+          echo "Signing $APP_PATH"
+          # Sign the embedded trussd binary first
+          find "$APP_PATH" -name trussd -type f -exec codesign --force --deep -s - {} \;
+          # Sign the Electron helper apps
+          find "$APP_PATH" -name "*.app" -type d -exec codesign --force --deep -s - {} \;
+          # Sign all .dylib and .so files
+          find "$APP_PATH" -type f \( -name "*.dylib" -o -name "*.so" \) -exec codesign --force -s - {} \;
+          # Sign the main .app bundle
+          codesign --force --deep -s - "$APP_PATH"
+          # Verify
+          codesign --verify --deep --verbose "$APP_PATH" 2>&1 || true
+      - name: Create DMG from signed .app
+        run: |
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            export ARCH_LABEL=intel
+          else
+            export ARCH_LABEL=${{ matrix.arch }}
+          fi
+          APP_PATH=$(find release -name "*.app" -type d | head -1)
+          DMG_NAME="truss-${{ github.ref_name }}-macos-${ARCH_LABEL}.dmg"
+          hdiutil create -volname "Truss" -srcfolder "$APP_PATH" \
+            -ov -format UDZO "release/${DMG_NAME}"
+      - name: Notarize and staple DMG (when secrets are present)
+        if: ${{ steps.mac_signing_mode.outputs.enabled == 'true' }}
+        env:
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            ARCH_LABEL=intel
+          else
+            ARCH_LABEL=${{ matrix.arch }}
+          fi
+          DMG_PATH="release/truss-${{ github.ref_name }}-macos-${ARCH_LABEL}.dmg"
+          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          echo "$APPLE_API_KEY_P8_BASE64" | base64 --decode > "$API_KEY_PATH"
+          xcrun notarytool submit "$DMG_PATH" \
+            --key "$API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "$DMG_PATH"
+          spctl -a -vv -t open "$DMG_PATH"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-dmg-${{ matrix.arch }}
+          path: release/*.dmg
+
+  package-windows:
+    needs: [build-backend, build-frontend, build-icon]
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: backend-win-${{ matrix.arch }}
+          path: backend/bin/win/${{ matrix.arch }}/
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: app/dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: icon
+          path: app/build/
+      - name: Set version in package.json
+        run: npm --prefix app version --allow-same-version --no-git-tag-version ${{ github.ref_name }}
+      - run: cd app && npm ci
+      - name: Build Windows NSIS installer
+        shell: bash
+        run: |
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            export ARCH_LABEL=amd64
+          else
+            export ARCH_LABEL=${{ matrix.arch }}
+          fi
+          export APP_VERSION=${{ github.ref_name }}
+          cd app && npx electron-builder --win nsis --${{ matrix.arch }} --publish=never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-nsis-${{ matrix.arch }}
+          path: release/*.exe
+
+  create-release:
+    needs: [package-linux, package-mac, package-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-appimage-x64
+          path: artifacts/
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-appimage-arm64
+          path: artifacts/
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-dmg-x64
+          path: artifacts/
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-dmg-arm64
+          path: artifacts/
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-nsis-x64
+          path: artifacts/
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-nsis-arm64
+          path: artifacts/
+      - name: Detect GPG signing secret availability
+        id: gpg_signing_mode
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+        run: |
+          if [ -n "$GPG_PRIVATE_KEY" ] && [ -n "$GPG_KEY_ID" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Import GPG private key (optional)
+        if: ${{ steps.gpg_signing_mode.outputs.enabled == 'true' }}
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+          echo "$GPG_PRIVATE_KEY" | base64 --decode > "$RUNNER_TEMP/truss-gpg-private.asc"
+          gpg --batch --import "$RUNNER_TEMP/truss-gpg-private.asc"
+      - name: Generate checksums and signatures
+        env:
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum * > SHA256SUMS
+          if [ "${{ steps.gpg_signing_mode.outputs.enabled }}" = "true" ]; then
+            export GNUPGHOME="$RUNNER_TEMP/gnupg"
+            GPG_OPTS=(--batch --yes --pinentry-mode loopback)
+            if [ -n "${GPG_PASSPHRASE:-}" ]; then
+              GPG_OPTS+=(--passphrase "$GPG_PASSPHRASE")
+            fi
+            # Detached signature for checksum manifest.
+            gpg "${GPG_OPTS[@]}" --local-user "$GPG_KEY_ID" --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS
+            # Optional detached per-artifact signatures.
+            for f in *; do
+              if [ ! -f "$f" ] || [ "$f" = "SHA256SUMS" ] || [ "$f" = "SHA256SUMS.asc" ] || [[ "$f" == *.sig ]]; then
+                continue
+              fi
+              gpg "${GPG_OPTS[@]}" --local-user "$GPG_KEY_ID" --detach-sign --output "$f.sig" "$f"
+            done
+          fi
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*

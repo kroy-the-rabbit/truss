@@ -1,0 +1,59 @@
+---
+title: Security
+description: Truss security model, disclosure process, and hardening guidance.
+order: 5
+---
+
+import Callout from '@/components/Callout.astro';
+
+## Security Model
+
+Truss is a **local-first desktop app** designed for use on a trusted workstation. It is not a hosted service.
+
+| Property | Detail |
+|----------|--------|
+| Backend binding | `127.0.0.1` only, ephemeral port |
+| Renderer ↔ backend auth | Per-launch bearer token |
+| WebSocket auth | `Sec-WebSocket-Protocol` header token |
+| Credential storage | AES-256-GCM + Argon2id (password) or GPG |
+| Electron renderer | Isolation and Chromium sandbox enabled |
+| Plugin model | Privileged — only install trusted plugins |
+
+## Supported Versions
+
+Security fixes target the current stable `1.x` line and the active pre-release line.
+
+## Reporting a Vulnerability
+
+**Do not open a public GitHub issue for sensitive security reports.**
+
+Preferred paths:
+1. **GitHub Security Advisory** — private report via the repo's Security tab
+2. **Email** — `kroy@kroy.io`
+
+Please include: affected version, platform, reproduction steps, and impact assessment.
+
+## Hardening Guidance
+
+- Use a dedicated OS account for cluster operations where practical
+- Keep Truss in **RO mode** except during intentional mutations
+- Prefer least-privilege RBAC for stored kubeconfig contexts
+- Limit plugin usage to reviewed, trusted code
+- Keep artifact verification (`KEYS`, checksums) in your install workflow
+
+<Callout type="tip">
+  Use separate profiles for production and non-production clusters, and label production profiles with a distinct color.
+</Callout>
+
+## Non-Goals
+
+Truss is not designed to:
+- Defend against a fully compromised workstation
+- Safely run untrusted plugins
+- Provide multi-user isolation on a shared desktop session
+
+## Credential Scope
+
+Truss uses the same Kubernetes RBAC access that your stored credentials allow. Cluster-side RBAC restrictions still apply — Truss cannot exceed what your kubeconfig permits.
+
+For full details, see [SECURITY.md](https://github.com/kroy-the-rabbit/truss/blob/main/SECURITY.md) in the repository.

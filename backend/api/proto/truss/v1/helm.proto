@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package truss.v1;
+
+option go_package = "github.com/kroy/truss/backend/api/gen/go/truss/v1;trussv1";
+
+service HelmService {
+  rpc ListReleases(ListReleasesRequest) returns (ListReleasesResponse);
+  rpc GetRelease(GetReleaseRequest) returns (GetReleaseResponse);
+  rpc GetReleaseValues(GetReleaseValuesRequest) returns (GetReleaseValuesResponse);
+  rpc GetReleaseHistory(GetReleaseHistoryRequest) returns (GetReleaseHistoryResponse);
+  rpc UninstallRelease(UninstallReleaseRequest) returns (UninstallReleaseResponse);
+  rpc RollbackRelease(RollbackReleaseRequest) returns (RollbackReleaseResponse);
+  rpc UpgradeRelease(UpgradeReleaseRequest) returns (UpgradeReleaseResponse);
+}
+
+message HelmRelease {
+  string name = 1;
+  string namespace = 2;
+  string chart = 3;
+  string chart_version = 4;
+  string app_version = 5;
+  string status = 6;
+  int32 revision = 7;
+  string updated = 8;
+  string notes = 9;
+}
+
+message ReleaseRevision {
+  int32 revision = 1;
+  string status = 2;
+  string chart = 3;
+  string app_version = 4;
+  string updated = 5;
+  string description = 6;
+}
+
+message ListReleasesRequest {
+  string context = 1;
+  string namespace = 2;
+}
+
+message ListReleasesResponse {
+  repeated HelmRelease releases = 1;
+}
+
+message GetReleaseRequest {
+  string context = 1;
+  string namespace = 2;
+  string name = 3;
+}
+
+message GetReleaseResponse {
+  HelmRelease release = 1;
+}
+
+message GetReleaseValuesRequest {
+  string context = 1;
+  string namespace = 2;
+  string name = 3;
+}
+
+message GetReleaseValuesResponse {
+  string values_yaml = 1;
+}
+
+message GetReleaseHistoryRequest {
+  string context = 1;
+  string namespace = 2;
+  string name = 3;
+}
+
+message GetReleaseHistoryResponse {
+  repeated ReleaseRevision revisions = 1;
+}
+
+message UninstallReleaseRequest {
+  string context = 1;
+  string namespace = 2;
+  string name = 3;
+}
+
+message UninstallReleaseResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message RollbackReleaseRequest {
+  string context = 1;
+  string namespace = 2;
+  string name = 3;
+  int32 revision = 4;
+}
+
+message RollbackReleaseResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message UpgradeReleaseRequest {
+  string context = 1;
+  string namespace = 2;
+  string name = 3;
+  string values_yaml = 4;
+}
+
+message UpgradeReleaseResponse {
+  bool success = 1;
+  string message = 2;
+}

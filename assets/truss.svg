@@ -1,0 +1,81 @@
+<!--?xml version="1.0" encoding="UTF-8"?-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- Outer rounded-square clip (macOS-ish squircle radius) -->
+    <clipPath id="outerClip">
+      <rect x="64" y="64" width="896" height="896" rx="200" ry="200"></rect>
+    </clipPath>
+
+    <!-- Truss lattice pattern -->
+    <pattern id="trussPattern" patternUnits="userSpaceOnUse" width="220" height="220">
+      <!-- diagonals -->
+      <path d="M0,220 L220,0" stroke="#006B6B" stroke-width="36" stroke-linecap="round" opacity="0.95"></path>
+      <path d="M0,0 L220,220" stroke="#006B6B" stroke-width="36" stroke-linecap="round" opacity="0.95"></path>
+      <!-- horizontals (gives that “beam” look) -->
+      <path d="M-20,110 L240,110" stroke="#005F5F" stroke-width="28" stroke-linecap="round" opacity="0.95"></path>
+    </pattern>
+
+    <!-- Slight soft shadow via blur -->
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="10" result="blur"></feGaussianBlur>
+      <feOffset dx="0" dy="16" result="off"></feOffset>
+      <feColorMatrix in="off" type="matrix" values="0 0 0 0 0.00
+                0 0 0 0 0.33
+                0 0 0 0 0.33
+                0 0 0 0.55 0" result="shadow"></feColorMatrix>
+      <feMerge>
+        <feMergeNode in="shadow"></feMergeNode>
+        <feMergeNode in="SourceGraphic"></feMergeNode>
+      </feMerge>
+    </filter>
+
+    <!-- T shape path (used multiple times) -->
+    <path id="Tshape" d="
+      M 170 210
+      H 854
+      Q 890 210 890 246
+      V 332
+      Q 890 368 854 368
+      H 642
+      V 804
+      Q 642 860 586 860
+      H 438
+      Q 382 860 382 804
+      V 368
+      H 170
+      Q 134 368 134 332
+      V 246
+      Q 134 210 170 210
+      Z
+    "></path>
+  </defs>
+
+  <!-- Everything clipped to rounded-square -->
+  <g clip-path="url(#outerClip)">
+
+    <!-- Base background -->
+    <rect x="64" y="64" width="896" height="896" fill="#00A3A3"></rect>
+
+    <!-- Middle band -->
+    <rect x="64" y="360" width="896" height="320" fill="#009393"></rect>
+
+    <!-- Lattice over the band -->
+    <rect x="64" y="360" width="896" height="320" fill="url(#trussPattern)" opacity="0.95"></rect>
+
+    <!-- Subtle bottom band (like the original) -->
+    <rect x="64" y="820" width="896" height="120" fill="#008888" opacity="0.95"></rect>
+
+    <!-- T shadow (slightly down) -->
+    <g opacity="0.95" transform="translate(0,18)">
+      <use href="#Tshape" fill="#005E5E" opacity="0.85"></use>
+    </g>
+
+    <!-- Main T with white outline -->
+    <g filter="url(#softShadow)">
+      <use href="#Tshape" fill="#00A8A8"></use>
+      <use href="#Tshape" fill="none" stroke="#FFFFFF" stroke-width="44" stroke-linejoin="round"></use>
+      <!-- tiny inner dark accent at the bottom stem -->
+      <path d="M 420 808 H 604 Q 620 808 620 824 V 844 Q 620 860 604 860 H 420 Q 404 860 404 844 V 824 Q 404 808 420 808 Z" fill="#005A5A" opacity="0.9"></path>
+    </g>
+  </g>
+</svg>

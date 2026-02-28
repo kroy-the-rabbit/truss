@@ -1,0 +1,165 @@
+---
+import { siteNav } from '@/lib/nav';
+---
+
+<header
+  id="site-header"
+  class="sticky top-0 z-50 w-full border-b border-gray-200/80 bg-white/90 backdrop-blur-md
+         dark:border-gray-800/80 dark:bg-gray-950/90"
+>
+  <div class="mx-auto flex h-14 max-w-7xl items-center gap-6 px-4 sm:px-6 lg:px-8">
+    <!-- Logo -->
+    <a
+      href="/"
+      class="flex items-center gap-2.5 shrink-0 font-bold text-gray-900 dark:text-white
+             hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
+      aria-label="Truss home"
+    >
+      <svg
+        width="28" height="28" viewBox="0 0 1024 1024"
+        class="rounded-[6px] shrink-0"
+        aria-hidden="true"
+      >
+        <defs>
+          <clipPath id="hdr-clip">
+            <rect x="64" y="64" width="896" height="896" rx="200" ry="200"/>
+          </clipPath>
+          <pattern id="hdr-pat" patternUnits="userSpaceOnUse" width="220" height="220">
+            <path d="M0,220 L220,0"   stroke="#006B6B" stroke-width="36" stroke-linecap="round" opacity=".95"/>
+            <path d="M0,0 L220,220"   stroke="#006B6B" stroke-width="36" stroke-linecap="round" opacity=".95"/>
+            <path d="M-20,110 L240,110" stroke="#005F5F" stroke-width="28" stroke-linecap="round" opacity=".95"/>
+          </pattern>
+          <path id="hdr-T" d="M170 210H854Q890 210 890 246V332Q890 368 854 368H642V804Q642 860 586 860H438Q382 860 382 804V368H170Q134 368 134 332V246Q134 210 170 210Z"/>
+        </defs>
+        <g clip-path="url(#hdr-clip)">
+          <rect x="64" y="64" width="896" height="896" fill="#00A3A3"/>
+          <rect x="64" y="360" width="896" height="320" fill="#009393"/>
+          <rect x="64" y="360" width="896" height="320" fill="url(#hdr-pat)" opacity=".95"/>
+          <rect x="64" y="820" width="896" height="120" fill="#008888" opacity=".95"/>
+          <g opacity=".95" transform="translate(0,18)">
+            <use href="#hdr-T" fill="#005E5E" opacity=".85"/>
+          </g>
+          <use href="#hdr-T" fill="#00A8A8"/>
+          <use href="#hdr-T" fill="none" stroke="#FFF" stroke-width="44" stroke-linejoin="round"/>
+          <path d="M420 808H604Q620 808 620 824V844Q620 860 604 860H420Q404 860 404 844V824Q404 808 420 808Z" fill="#005A5A" opacity=".9"/>
+        </g>
+      </svg>
+      <span class="text-base tracking-tight">Truss</span>
+    </a>
+
+    <!-- Nav -->
+    <nav class="hidden sm:flex items-center gap-1 ml-2" aria-label="Site navigation">
+      {siteNav.map(link => (
+        <a
+          href={link.href}
+          target={link.external ? '_blank' : undefined}
+          rel={link.external ? 'noopener noreferrer' : undefined}
+          class="px-3 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-400
+                 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800
+                 rounded-md transition-colors"
+        >
+          {link.title}
+          {link.external && (
+            <span class="ml-0.5 opacity-50" aria-hidden="true">↗</span>
+          )}
+        </a>
+      ))}
+    </nav>
+
+    <div class="ml-auto flex items-center gap-2">
+      <!-- Theme toggle -->
+      <button
+        id="theme-toggle"
+        aria-label="Toggle dark mode"
+        class="p-2 rounded-md text-gray-500 hover:text-gray-900 dark:text-gray-400
+               dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800
+               transition-colors"
+      >
+        <svg id="icon-sun" class="h-4 w-4 hidden dark:block" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+          <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+        </svg>
+        <svg id="icon-moon" class="h-4 w-4 block dark:hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+      </button>
+
+      <!-- Download CTA -->
+      <a
+        href="https://github.com/kroy-the-rabbit/truss/releases/latest"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="hidden sm:inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md
+               bg-teal-600 hover:bg-teal-700 active:bg-teal-800
+               text-white text-sm font-semibold transition-colors shadow-sm"
+      >
+        Download
+      </a>
+
+      <!-- Mobile hamburger -->
+      <button
+        id="mobile-menu-btn"
+        aria-label="Open menu"
+        aria-expanded="false"
+        class="sm:hidden p-2 rounded-md text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+      >
+        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6"/>
+          <line x1="3" y1="12" x2="21" y2="12"/>
+          <line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Mobile nav drawer -->
+  <div
+    id="mobile-menu"
+    class="hidden sm:hidden border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 px-4 py-3"
+  >
+    <nav class="flex flex-col gap-1" aria-label="Mobile navigation">
+      {siteNav.map(link => (
+        <a
+          href={link.href}
+          target={link.external ? '_blank' : undefined}
+          rel={link.external ? 'noopener noreferrer' : undefined}
+          class="px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300
+                 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors"
+        >
+          {link.title}
+          {link.external && <span class="ml-1 opacity-50" aria-hidden="true">↗</span>}
+        </a>
+      ))}
+      <a
+        href="https://github.com/kroy-the-rabbit/truss/releases/latest"
+        class="mt-2 px-3 py-2 text-sm font-semibold text-white bg-teal-600 rounded-md text-center"
+      >
+        Download
+      </a>
+    </nav>
+  </div>
+</header>
+
+<script is:inline>
+  // Theme
+  const toggle = document.getElementById('theme-toggle');
+  const html = document.documentElement;
+  const stored = localStorage.getItem('theme');
+  if (stored === 'dark' || (!stored && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+    html.classList.add('dark');
+  }
+  toggle?.addEventListener('click', () => {
+    html.classList.toggle('dark');
+    localStorage.setItem('theme', html.classList.contains('dark') ? 'dark' : 'light');
+  });
+
+  // Mobile menu
+  const btn = document.getElementById('mobile-menu-btn');
+  const menu = document.getElementById('mobile-menu');
+  btn?.addEventListener('click', () => {
+    const open = menu?.classList.toggle('hidden') === false;
+    btn.setAttribute('aria-expanded', String(open));
+  });
+</script>
