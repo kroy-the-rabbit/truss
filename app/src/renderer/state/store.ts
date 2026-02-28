@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { GVR } from '../api/gen/truss/v1/resources_pb';
+import type { NavSnapshot } from './navCheckpoint';
 
 interface ContextNavState {
   namespace: string;
@@ -54,6 +55,8 @@ interface AppState {
   setActivePane: (pane: 'navigator' | 'list' | 'inspector') => void;
   setConnected: (connected: boolean) => void;
   setLiveUpdatesConnected: (connected: boolean) => void;
+  // Atomically restore navigation state after an unlock cycle.
+  restoreNav: (nav: NavSnapshot) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -139,4 +142,14 @@ export const useAppStore = create<AppState>((set) => ({
   setActivePane: (pane) => set({ activePane: pane }),
   setConnected: (connected) => set({ connected }),
   setLiveUpdatesConnected: (connected) => set({ liveUpdatesConnected: connected }),
+  restoreNav: (nav) =>
+    set({
+      activeContext: nav.activeContext,
+      activeNamespace: nav.activeNamespace,
+      selectedKind: nav.selectedKind,
+      selectedKindLabel: nav.selectedKindLabel,
+      selectedResource: nav.selectedResource,
+      selectedResourceNamespace: nav.selectedResourceNamespace,
+      activePane: nav.activePane,
+    }),
 }));

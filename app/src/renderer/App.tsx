@@ -10,6 +10,7 @@ import { Modal } from './components/Modal';
 import { SetupWizard } from './components/SetupWizard';
 import { PasswordPrompt } from './components/PasswordPrompt';
 import { useAppStore } from './state/store';
+import { saveNavCheckpoint, restoreNavCheckpoint, saveNavForRestart, restoreNavForRestart } from './state/navCheckpoint';
 import { fetchSetupAPI, getResourcesClient } from './api/client';
 import { PluginProvider } from './plugins';
 import { pluginRegistry } from './plugins';
@@ -78,9 +79,53 @@ function AppLayout() {
     themeMode,
     effectiveTheme,
     userCss,
+    restoreNav,
   } = useAppStore();
   const qc = useQueryClient();
   useLiveResourceInvalidation();
+
+  // Restore navigation position on mount.
+  // Priority: sessionStorage (lock/unlock path) → localStorage (restart path).
+  // Both stores are consumed immediately so stale data never lingers.
+  useEffect(() => {
+    const nav = restoreNavCheckpoint() ?? restoreNavForRestart();
+    if (nav) restoreNav(nav);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist nav state for restart recovery.
+  // Debounced 1 s after any navigation change — covers hard kills.
+  // Also saved synchronously on beforeunload — covers graceful exits.
+  const navForRestartRef = useRef<{
+    activeContext: string; activeNamespace: string;
+    selectedKind: typeof selectedKind; selectedKindLabel: string;
+    selectedResource: string; selectedResourceNamespace: string;
+    activePane: typeof activePane;
+  } | null>(null);
+
+  useEffect(() => {
+    navForRestartRef.current = {
+      activeContext, activeNamespace, selectedKind, selectedKindLabel,
+      selectedResource, selectedResourceNamespace, activePane,
+    };
+  }, [activeContext, activeNamespace, selectedKind, selectedKindLabel,
+      selectedResource, selectedResourceNamespace, activePane]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (navForRestartRef.current) saveNavForRestart(navForRestartRef.current);
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [activeContext, activeNamespace, selectedKind, selectedKindLabel,
+      selectedResource, selectedResourceNamespace, activePane]);
+
+  useEffect(() => {
+    const onUnload = () => {
+      if (navForRestartRef.current) saveNavForRestart(navForRestartRef.current);
+    };
+    window.addEventListener('beforeunload', onUnload);
+    return () => window.removeEventListener('beforeunload', onUnload);
+  }, []);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteMode, setCommandPaletteMode] = useState<'command' | 'search'>('command');
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -201,6 +246,17 @@ function AppLayout() {
         try {
           const resp = await fetchSetupAPI('/api/setup/lock', { method: 'POST' });
           if (resp.ok) {
+            // Save nav state before the reload so we can restore it after unlock.
+            const s = useAppStore.getState();
+            saveNavCheckpoint({
+              activeContext: s.activeContext,
+              activeNamespace: s.activeNamespace,
+              selectedKind: s.selectedKind,
+              selectedKindLabel: s.selectedKindLabel,
+              selectedResource: s.selectedResource,
+              selectedResourceNamespace: s.selectedResourceNamespace,
+              activePane: s.activePane,
+            });
             const api = (window as any).electronAPI;
             if (api?.sessionBroadcast) await api.sessionBroadcast('locked');
             window.location.reload();
