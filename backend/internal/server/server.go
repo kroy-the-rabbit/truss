@@ -1064,7 +1064,7 @@ func convertToProto(obj *unstructured.Unstructured, kind string, summaryFields [
 			Name:              obj.GetName(),
 			Namespace:         obj.GetNamespace(),
 			Uid:               string(obj.GetUID()),
-			CreationTimestamp: obj.GetCreationTimestamp().Format("2006-01-02T15:04:05Z"),
+			CreationTimestamp: obj.GetCreationTimestamp().UTC().Format(time.RFC3339),
 			Labels:            labels,
 			Annotations:       annotations,
 		},
@@ -1087,7 +1087,7 @@ func buildContainerInfo(name, image string, isInit bool, status corev1.Container
 	}
 	if status.State.Running != nil {
 		info.State = "running"
-		info.StartedAt = status.State.Running.StartedAt.Format("2006-01-02T15:04:05Z")
+		info.StartedAt = status.State.Running.StartedAt.UTC().Format(time.RFC3339)
 	} else if status.State.Waiting != nil {
 		info.State = "waiting"
 		info.Reason = status.State.Waiting.Reason
@@ -1097,10 +1097,10 @@ func buildContainerInfo(name, image string, isInit bool, status corev1.Container
 		info.Reason = status.State.Terminated.Reason
 		info.Message = status.State.Terminated.Message
 		if !status.State.Terminated.StartedAt.IsZero() {
-			info.StartedAt = status.State.Terminated.StartedAt.Format("2006-01-02T15:04:05Z")
+			info.StartedAt = status.State.Terminated.StartedAt.UTC().Format(time.RFC3339)
 		}
 		if !status.State.Terminated.FinishedAt.IsZero() {
-			info.FinishedAt = status.State.Terminated.FinishedAt.Format("2006-01-02T15:04:05Z")
+			info.FinishedAt = status.State.Terminated.FinishedAt.UTC().Format(time.RFC3339)
 		}
 	}
 	return info
@@ -1144,11 +1144,11 @@ func (s *Server) ListEvents(
 
 		firstSeen := ""
 		if !ev.FirstTimestamp.IsZero() {
-			firstSeen = ev.FirstTimestamp.Format("2006-01-02T15:04:05Z")
+			firstSeen = ev.FirstTimestamp.UTC().Format(time.RFC3339)
 		}
 		lastSeen := ""
 		if !ev.LastTimestamp.IsZero() {
-			lastSeen = ev.LastTimestamp.Format("2006-01-02T15:04:05Z")
+			lastSeen = ev.LastTimestamp.UTC().Format(time.RFC3339)
 		}
 
 		events = append(events, &pb.EventItem{

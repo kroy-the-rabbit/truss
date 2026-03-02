@@ -2883,6 +2883,10 @@ body {
   background: rgba(137, 180, 250, 0.1);
 }
 
+.service-ports-forward-list { display: flex; flex-direction: column; gap: 4px; }
+.service-port-forward-row { display: flex; align-items: center; gap: 8px; }
+.service-port-forward-num { font-family: monospace; font-size: 12px; min-width: 48px; color: var(--text-primary); }
+
 /* Session Window (singleton windows for logs/exec with tabs) */
 .session-window {
   display: flex;

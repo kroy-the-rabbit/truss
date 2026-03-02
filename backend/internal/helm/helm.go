@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"time"
 
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/release"
@@ -79,7 +80,7 @@ func releaseToInfo(rel *release.Release) *Release {
 		r.AppVersion = rel.Chart.Metadata.AppVersion
 	}
 	if !rel.Info.LastDeployed.IsZero() {
-		r.Updated = rel.Info.LastDeployed.Format("2006-01-02T15:04:05Z")
+		r.Updated = rel.Info.LastDeployed.UTC().Format(time.RFC3339)
 	}
 	return r
 }
@@ -182,7 +183,7 @@ func GetHistory(cfg *rest.Config, namespace, name string) ([]*Revision, error) {
 			rev.AppVersion = rel.Chart.Metadata.AppVersion
 		}
 		if !rel.Info.LastDeployed.IsZero() {
-			rev.Updated = rel.Info.LastDeployed.Format("2006-01-02T15:04:05Z")
+			rev.Updated = rel.Info.LastDeployed.UTC().Format(time.RFC3339)
 		}
 		revisions = append(revisions, rev)
 	}

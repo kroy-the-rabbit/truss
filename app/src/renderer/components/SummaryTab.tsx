@@ -29,6 +29,7 @@ export function SummaryTab({ resource }: Props) {
   const isWorkload = ['Deployment', 'StatefulSet', 'DaemonSet', 'ReplicaSet', 'Job'].includes(resource.kind);
   const isNamespace = resource.kind === 'Namespace';
   const isSecret = resource.kind === 'Secret';
+  const isService = resource.kind === 'Service';
 
   return (
     <div className="summary-tab">
@@ -49,6 +50,7 @@ export function SummaryTab({ resource }: Props) {
       {isWorkload && <OwnedPodsSummary kind={resource.kind} name={meta?.name || ''} namespace={meta?.namespace || ''} />}
       {isNamespace && <NamespaceInventory namespaceName={meta?.name || ''} />}
       {isSecret && <SecretDataSection resource={resource} />}
+      {isService && <ServicePortForwardSection resource={resource} />}
 
       {resource.conditions.length > 0 && (
         <section className="summary-section">
@@ -108,6 +110,51 @@ export function SummaryTab({ resource }: Props) {
         </section>
       )}
     </div>
+  );
+}
+
+function ServicePortForwardSection({ resource }: { resource: Resource }) {
+  const { activeContext } = useAppStore();
+  const meta = resource.metadata;
+
+  // Parse port numbers from summarizer output: "80/TCP, 8080/TCP" → [80, 8080]
+  const portsField = resource.summary.find((f) => f.key === 'Ports')?.value || '';
+  const ports = portsField
+    .split(',')
+    .map((s) => parseInt(s.trim().split('/')[0], 10))
+    .filter((n) => Number.isFinite(n) && n > 0);
+
+  if (!ports.length) return null;
+
+  const openForward = (port: number) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).electronAPI?.openPortForwardWindow?.({
+      context: activeContext,
+      namespace: meta?.namespace || '',
+      targetType: 'service',
+      targetName: meta?.name || '',
+      targetPort: port,
+    });
+  };
+
+  return (
+    <section className="summary-section">
+      <h3>Port Forward</h3>
+      <div className="service-ports-forward-list">
+        {ports.map((port) => (
+          <div key={port} className="service-port-forward-row">
+            <span className="service-port-forward-num">{port}</span>
+            <button
+              className="container-action-btn"
+              onClick={() => openForward(port)}
+              title={`Port-forward ${meta?.name} port ${port}`}
+            >
+              Forward
+            </button>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
