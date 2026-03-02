@@ -405,6 +405,26 @@ body {
 .ns-picker-option.selected { color: var(--accent); }
 .ns-picker-option input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
 
+.ns-picker-search-row {
+  padding: 6px 8px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.ns-picker-search {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  outline: none;
+}
+.ns-picker-search:focus { border-color: var(--accent); }
+.ns-picker-custom { color: var(--text-secondary); font-style: italic; }
+.ns-picker-custom:hover { color: var(--text-primary); background: var(--bg-hover); }
+
 /* Bulk action bar */
 .bulk-action-bar {
   display: flex;

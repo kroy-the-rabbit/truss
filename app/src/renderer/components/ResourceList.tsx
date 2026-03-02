@@ -150,10 +150,17 @@ function isRbacDeniedError(err: unknown): boolean {
 }
 
 function NamespaceHeader({ nsFilter, setNsFilter }: { nsFilter: Set<string>; setNsFilter: (f: Set<string>) => void }) {
-  const { activeContext, setActiveNamespace } = useAppStore();
+  const { activeContext, activeNamespace, setActiveNamespace } = useAppStore();
   const namespaces = useNamespaces(activeContext);
   const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open) { setSearch(''); return; }
+    requestAnimationFrame(() => searchRef.current?.focus());
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -171,6 +178,18 @@ function NamespaceHeader({ nsFilter, setNsFilter }: { nsFilter: Set<string>; set
     setActiveNamespace(next.size === 1 ? [...next][0] : '');
   };
 
+  const selectDirect = (ns: string) => {
+    const next = new Set([ns]);
+    setNsFilter(next);
+    setActiveNamespace(ns);
+    setOpen(false);
+  };
+
+  const allNs = namespaces.data?.namespaces ?? [];
+  const lowerSearch = search.toLowerCase();
+  const filtered = lowerSearch ? allNs.filter((ns) => ns.name.toLowerCase().includes(lowerSearch)) : allNs;
+  const showCustom = search.trim() !== '' && !allNs.some((ns) => ns.name === search.trim());
+
   const label = nsFilter.size === 0
     ? 'All namespaces'
     : nsFilter.size === 1
@@ -183,24 +202,51 @@ function NamespaceHeader({ nsFilter, setNsFilter }: { nsFilter: Set<string>; set
       <button
         className={`ns-picker-btn${nsFilter.size > 0 ? ' has-filter' : ''}`}
         onClick={() => setOpen((o) => !o)}
-        disabled={!namespaces.data}
+        disabled={!namespaces.data && nsFilter.size === 0 && !activeNamespace}
       >
         {label} <span className="ns-picker-caret">▾</span>
       </button>
       {open && (
         <div className="ns-picker-dropdown">
-          <div
-            className={`ns-picker-option${nsFilter.size === 0 ? ' selected' : ''}`}
-            onClick={() => { setNsFilter(new Set()); setActiveNamespace(''); setOpen(false); }}
-          >
-            All namespaces
+          <div className="ns-picker-search-row">
+            <input
+              ref={searchRef}
+              className="ns-picker-search"
+              type="text"
+              placeholder="Filter or type namespace…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && search.trim()) {
+                  selectDirect(search.trim());
+                } else if (e.key === 'Escape') {
+                  setOpen(false);
+                }
+              }}
+            />
           </div>
-          {namespaces.data?.namespaces.map((ns) => (
+          {!search && (
+            <div
+              className={`ns-picker-option${nsFilter.size === 0 ? ' selected' : ''}`}
+              onClick={() => { setNsFilter(new Set()); setActiveNamespace(''); setOpen(false); }}
+            >
+              All namespaces
+            </div>
+          )}
+          {filtered.map((ns) => (
             <label key={ns.name} className={`ns-picker-option${nsFilter.has(ns.name) ? ' selected' : ''}`}>
               <input type="checkbox" checked={nsFilter.has(ns.name)} onChange={() => toggleNs(ns.name)} />
               {ns.name}
             </label>
           ))}
+          {showCustom && (
+            <div
+              className="ns-picker-option ns-picker-custom"
+              onClick={() => selectDirect(search.trim())}
+            >
+              Use &ldquo;{search.trim()}&rdquo; directly
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -213,11 +259,23 @@ function HelmReleaseList() {
   const [sortField, setSortField] = useState<SortField>('name');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [menu, setMenu] = useState<MenuState | null>(null);
-  const [nsFilter, setNsFilter] = useState<Set<string>>(new Set());
+  const [nsFilter, setNsFilter] = useState<Set<string>>(() =>
+    activeNamespace ? new Set([activeNamespace]) : new Set(),
+  );
   const helmReleases = useHelmReleases(activeContext, activeNamespace);
   const uninstall = useUninstallRelease();
   const isFocused = activePane === 'list';
   const helmTableRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setNsFilter((prev) => {
+      if (activeNamespace) {
+        if (prev.size === 1 && prev.has(activeNamespace)) return prev;
+        return new Set([activeNamespace]);
+      }
+      return prev;
+    });
+  }, [activeNamespace]);
 
   // Arrow key navigation when the list pane is focused.
   useEffect(() => {
@@ -391,11 +449,26 @@ export function ResourceList() {
   const [healthFilter, setHealthFilter] = useState<HealthCategory | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [multiSelected, setMultiSelected] = useState<Set<string>>(new Set()); // "ns/name"
-  const [nsFilter, setNsFilter] = useState<Set<string>>(new Set());
+  const [nsFilter, setNsFilter] = useState<Set<string>>(() =>
+    activeNamespace ? new Set([activeNamespace]) : new Set(),
+  );
   const resources = useResources(activeContext, activeNamespace, selectedKind, filter);
   const deleteMutation = useDeleteResource();
   const restartMutation = useRestartResource();
   const isFocused = activePane === 'list';
+
+  // Sync nsFilter when activeNamespace is set externally (checkpoint restore, context switch).
+  // Uses functional setter so we can read current nsFilter without adding it as a dependency
+  // (which would trigger on every user toggle and clobber multi-select).
+  useEffect(() => {
+    setNsFilter((prev) => {
+      if (activeNamespace) {
+        if (prev.size === 1 && prev.has(activeNamespace)) return prev; // already correct
+        return new Set([activeNamespace]);
+      }
+      return prev; // don't clear multi-select when store has '' (user may have just added a second ns)
+    });
+  }, [activeNamespace]);
 
   // Tick every 60s so age column updates without a full refetch.
   const [, setAgeTick] = useState(0);
