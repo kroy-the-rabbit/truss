@@ -24,12 +24,16 @@ function stateIcon(state: string, ready: boolean): string {
 }
 
 export function SummaryTab({ resource }: Props) {
+  const { selectedKindLabel } = useAppStore();
   const meta = resource.metadata;
-  const isPod = resource.kind === 'Pod';
-  const isWorkload = ['Deployment', 'StatefulSet', 'DaemonSet', 'ReplicaSet', 'Job'].includes(resource.kind);
-  const isNamespace = resource.kind === 'Namespace';
-  const isSecret = resource.kind === 'Secret';
-  const isService = resource.kind === 'Service';
+  // Dynamic client responses sometimes omit kind; fall back to the store label.
+  const effectiveKind = resource.kind || selectedKindLabel;
+  const isPod = effectiveKind === 'Pod';
+  const isWorkload = ['Deployment', 'StatefulSet', 'DaemonSet', 'ReplicaSet', 'Job'].includes(effectiveKind);
+  const isNamespace = effectiveKind === 'Namespace';
+  const isSecret = effectiveKind === 'Secret';
+  const isService = effectiveKind === 'Service';
+  const isIngress = effectiveKind === 'Ingress';
 
   return (
     <div className="summary-tab">
@@ -51,6 +55,7 @@ export function SummaryTab({ resource }: Props) {
       {isNamespace && <NamespaceInventory namespaceName={meta?.name || ''} />}
       {isSecret && <SecretDataSection resource={resource} />}
       {isService && <ServicePortForwardSection resource={resource} />}
+      {isIngress && <IngressPortForwardSection resource={resource} />}
 
       {resource.conditions.length > 0 && (
         <section className="summary-section">
@@ -148,6 +153,60 @@ function ServicePortForwardSection({ resource }: { resource: Resource }) {
               className="container-action-btn"
               onClick={() => openForward(port)}
               title={`Port-forward ${meta?.name} port ${port}`}
+            >
+              Forward
+            </button>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function IngressPortForwardSection({ resource }: { resource: Resource }) {
+  const { activeContext } = useAppStore();
+  const meta = resource.metadata;
+
+  // Parse backends from summarizer output: "svcname:80, svcname2:443" → [{name, port}]
+  const backendsField = resource.summary.find((f) => f.key === 'Backends')?.value || '';
+  const backends = backendsField
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      const idx = s.lastIndexOf(':');
+      if (idx === -1) return null;
+      const name = s.slice(0, idx);
+      const port = parseInt(s.slice(idx + 1), 10);
+      if (!name || !Number.isFinite(port) || port <= 0) return null;
+      return { name, port };
+    })
+    .filter((b): b is { name: string; port: number } => b !== null);
+
+  if (!backends.length) return null;
+
+  const openForward = (svcName: string, port: number) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).electronAPI?.openPortForwardWindow?.({
+      context: activeContext,
+      namespace: meta?.namespace || '',
+      targetType: 'service',
+      targetName: svcName,
+      targetPort: port,
+    });
+  };
+
+  return (
+    <section className="summary-section">
+      <h3>Port Forward (Backends)</h3>
+      <div className="service-ports-forward-list">
+        {backends.map(({ name, port }) => (
+          <div key={`${name}:${port}`} className="service-port-forward-row">
+            <span className="service-port-forward-num">{name}:{port}</span>
+            <button
+              className="container-action-btn"
+              onClick={() => openForward(name, port)}
+              title={`Port-forward service ${name} port ${port}`}
             >
               Forward
             </button>

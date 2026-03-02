@@ -466,6 +466,136 @@ func TestExtractConditionsEmpty(t *testing.T) {
 // getString helper
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Ingress
+// ---------------------------------------------------------------------------
+
+func TestSummarizeIngressFull(t *testing.T) {
+	obj := u(map[string]interface{}{
+		"spec": map[string]interface{}{
+			"ingressClassName": "nginx",
+			"rules": []interface{}{
+				map[string]interface{}{
+					"host": "foo.example.com",
+					"http": map[string]interface{}{
+						"paths": []interface{}{
+							map[string]interface{}{
+								"backend": map[string]interface{}{
+									"service": map[string]interface{}{
+										"name": "my-svc",
+										"port": map[string]interface{}{"number": int64(80)},
+									},
+								},
+							},
+						},
+					},
+				},
+				map[string]interface{}{
+					"host": "bar.example.com",
+					"http": map[string]interface{}{
+						"paths": []interface{}{
+							map[string]interface{}{
+								"backend": map[string]interface{}{
+									"service": map[string]interface{}{
+										"name": "other-svc",
+										"port": map[string]interface{}{"number": int64(443)},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	fields := Summarize("Ingress", obj)
+	if got := mustField(t, fields, "Class"); got != "nginx" {
+		t.Errorf("Class = %q, want nginx", got)
+	}
+	if got := mustField(t, fields, "Hosts"); got != "foo.example.com, bar.example.com" {
+		t.Errorf("Hosts = %q", got)
+	}
+	if got := mustField(t, fields, "Backends"); got != "my-svc:80, other-svc:443" {
+		t.Errorf("Backends = %q", got)
+	}
+}
+
+func TestSummarizeIngressDeduplicatesBackends(t *testing.T) {
+	// Two paths to the same backend should produce one entry.
+	obj := u(map[string]interface{}{
+		"spec": map[string]interface{}{
+			"rules": []interface{}{
+				map[string]interface{}{
+					"host": "foo.example.com",
+					"http": map[string]interface{}{
+						"paths": []interface{}{
+							map[string]interface{}{
+								"backend": map[string]interface{}{
+									"service": map[string]interface{}{
+										"name": "svc",
+										"port": map[string]interface{}{"number": int64(80)},
+									},
+								},
+							},
+							map[string]interface{}{
+								"backend": map[string]interface{}{
+									"service": map[string]interface{}{
+										"name": "svc",
+										"port": map[string]interface{}{"number": int64(80)},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	fields := Summarize("Ingress", obj)
+	if got := mustField(t, fields, "Backends"); got != "svc:80" {
+		t.Errorf("Backends = %q, want svc:80 (deduped)", got)
+	}
+}
+
+func TestSummarizeIngressEmpty(t *testing.T) {
+	obj := u(map[string]interface{}{})
+	fields := Summarize("Ingress", obj)
+	if len(fields) != 0 {
+		t.Errorf("expected no fields for empty Ingress, got %+v", fields)
+	}
+}
+
+func TestSummarizeIngressNoClass(t *testing.T) {
+	obj := u(map[string]interface{}{
+		"spec": map[string]interface{}{
+			"rules": []interface{}{
+				map[string]interface{}{
+					"host": "foo.example.com",
+					"http": map[string]interface{}{
+						"paths": []interface{}{
+							map[string]interface{}{
+								"backend": map[string]interface{}{
+									"service": map[string]interface{}{
+										"name": "svc",
+										"port": map[string]interface{}{"number": float64(8080)},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	fields := Summarize("Ingress", obj)
+	if _, ok := fieldValue(fields, "Class"); ok {
+		t.Error("expected no Class field when ingressClassName is absent")
+	}
+	if got := mustField(t, fields, "Backends"); got != "svc:8080" {
+		t.Errorf("Backends = %q, want svc:8080", got)
+	}
+}
+
 func TestGetString(t *testing.T) {
 	m := map[string]interface{}{
 		"str":   "hello",

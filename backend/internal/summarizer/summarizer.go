@@ -32,6 +32,8 @@ func Summarize(kind string, obj *unstructured.Unstructured) []SummaryField {
 		return summarizeDeployment(obj)
 	case "Service":
 		return summarizeService(obj)
+	case "Ingress":
+		return summarizeIngress(obj)
 	case "StatefulSet":
 		return summarizeStatefulSet(obj)
 	case "DaemonSet":
@@ -185,6 +187,78 @@ func summarizeDeployment(obj *unstructured.Unstructured) []SummaryField {
 		{Key: "Available", Value: fmt.Sprintf("%d", available)},
 		{Key: "Replicas", Value: fmt.Sprintf("%d", replicas)},
 	}
+}
+
+func summarizeIngress(obj *unstructured.Unstructured) []SummaryField {
+	ingressClass := getNestedString(obj, "spec", "ingressClassName")
+	rules, _, _ := unstructured.NestedSlice(obj.Object, "spec", "rules")
+
+	var hosts []string
+	seen := make(map[string]struct{})
+	var backends []string
+
+	for _, r := range rules {
+		rm, ok := r.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if host := getString(rm, "host"); host != "" {
+			hosts = append(hosts, host)
+		}
+		httpObj, ok := rm["http"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		paths, _ := httpObj["paths"].([]interface{})
+		for _, p := range paths {
+			pm, ok := p.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			backendObj, ok := pm["backend"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			svcObj, ok := backendObj["service"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			svcName := getString(svcObj, "name")
+			if svcName == "" {
+				continue
+			}
+			portObj, _ := svcObj["port"].(map[string]interface{})
+			var portStr string
+			if portObj != nil {
+				switch v := portObj["number"].(type) {
+				case int64:
+					portStr = fmt.Sprintf("%d", v)
+				case float64:
+					portStr = fmt.Sprintf("%d", int(v))
+				}
+			}
+			if portStr == "" {
+				continue
+			}
+			key := svcName + ":" + portStr
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				backends = append(backends, key)
+			}
+		}
+	}
+
+	var fields []SummaryField
+	if ingressClass != "" {
+		fields = append(fields, SummaryField{Key: "Class", Value: ingressClass})
+	}
+	if len(hosts) > 0 {
+		fields = append(fields, SummaryField{Key: "Hosts", Value: strings.Join(hosts, ", ")})
+	}
+	if len(backends) > 0 {
+		fields = append(fields, SummaryField{Key: "Backends", Value: strings.Join(backends, ", ")})
+	}
+	return fields
 }
 
 func summarizeService(obj *unstructured.Unstructured) []SummaryField {
