@@ -6,7 +6,7 @@ stages:
 
 variables:
   GO_VERSION: "1.25"
-  NODE_VERSION: "22"
+  NODE_VERSION: "24"
 
 # --- Test ---
 
@@ -32,9 +32,9 @@ test:frontend:unit:
 
 test:frontend:smoke:
   stage: test
-  image: mcr.microsoft.com/playwright:v1.58.2-jammy
+  image: node:${NODE_VERSION}
   script:
-    - cd app && npm ci && npm run test:e2e
+    - cd app && npm ci && npx playwright install --with-deps chromium && npm run test:e2e
   artifacts:
     when: always
     paths:

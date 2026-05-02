@@ -5,6 +5,9 @@
   "author": "kroy <kroy@kroy.io>",
   "description": "Three-pane Kubernetes management desktop app",
   "main": "dist/main/main.js",
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "icons:generate": "bash scripts/generate-icons.sh",
     "dev": "vite",
