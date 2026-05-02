@@ -46,7 +46,7 @@ interface PortForwardRecord {
   targetType: 'pod' | 'service';
   targetName: string;
   localPort: number;
-  targetPort: number;
+  targetPort: number | string;
   status: 'starting' | 'running' | 'stopped' | 'error';
   startedAt: string;
   stoppedAt?: string;
@@ -769,7 +769,10 @@ ipcMain.handle('open-portforward-window', async (_event, opts: Record<string, un
     return { ok: true };
   }
 
-  const targetPortProvided = typeof opts.targetPort === 'number' && Number.isFinite(opts.targetPort);
+  const rawTargetPort = opts.targetPort;
+  const targetPortProvided =
+    (typeof rawTargetPort === 'number' && Number.isFinite(rawTargetPort) && rawTargetPort > 0) ||
+    (typeof rawTargetPort === 'string' && rawTargetPort.trim() !== '');
   const localPortProvided = typeof opts.localPort === 'number' && Number.isFinite(opts.localPort);
   const prefill: {
     context: string;
@@ -777,14 +780,16 @@ ipcMain.handle('open-portforward-window', async (_event, opts: Record<string, un
     targetType: 'pod' | 'service';
     targetName: string;
     localPort: number;
-    targetPort: number;
+    targetPort: number | string;
   } = {
     context: typeof opts.context === 'string' ? opts.context : '',
     namespace: typeof opts.namespace === 'string' ? opts.namespace : '',
     targetType: opts.targetType === 'service' ? 'service' : 'pod',
     targetName: typeof opts.targetName === 'string' ? opts.targetName : '',
     localPort: localPortProvided ? Number(opts.localPort) : 0,
-    targetPort: targetPortProvided ? Number(opts.targetPort) : 0,
+    targetPort: targetPortProvided
+      ? (typeof rawTargetPort === 'string' ? rawTargetPort.trim() : Number(rawTargetPort))
+      : 0,
   };
 
   if (!targetPortProvided && prefill.targetName) {
@@ -797,7 +802,7 @@ ipcMain.handle('open-portforward-window', async (_event, opts: Record<string, un
     }
   }
   if (prefill.localPort <= 0) prefill.localPort = 8080;
-  if (prefill.targetPort <= 0) prefill.targetPort = 8080;
+  if (typeof prefill.targetPort === 'number' && prefill.targetPort <= 0) prefill.targetPort = 8080;
 
   const win = new BrowserWindow({
     width: 980,
@@ -847,9 +852,9 @@ ipcMain.handle('port-forward-start', (_event, opts: Record<string, unknown>) => 
   const targetType = opts.targetType === 'service' ? 'service' : 'pod';
   const targetName = typeof opts.targetName === 'string' ? opts.targetName.trim() : '';
   const localPort = Number(opts.localPort);
-  const targetPort = Number(opts.targetPort);
+  const targetPort = normalizePortForwardTargetPort(opts.targetPort);
 
-  if (!namespace || !targetName || !Number.isFinite(localPort) || !Number.isFinite(targetPort) || localPort <= 0 || targetPort <= 0) {
+  if (!namespace || !targetName || !Number.isFinite(localPort) || localPort <= 0 || targetPort === undefined) {
     throw new Error('Invalid port forward parameters');
   }
 
@@ -1083,6 +1088,23 @@ function trySpawnTerminal(terminals: Array<{ cmd: string; args: string[] }>) {
 function trimPortForwardOutput(out: string): string {
   if (out.length <= 64_000) return out;
   return out.slice(out.length - 64_000);
+}
+
+function normalizePortForwardTargetPort(value: unknown): number | string | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  }
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (/^\d+$/.test(trimmed)) {
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  }
+  if (/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(trimmed)) {
+    return trimmed;
+  }
+  return undefined;
 }
 
 function derivePortForwardMessage(output: string, fallback: string): string {

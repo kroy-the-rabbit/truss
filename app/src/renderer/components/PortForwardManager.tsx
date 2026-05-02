@@ -8,7 +8,7 @@ interface PortForwardRecord {
   targetType: 'pod' | 'service';
   targetName: string;
   localPort: number;
-  targetPort: number;
+  targetPort: number | string;
   status: 'starting' | 'running' | 'stopped' | 'error';
   startedAt: string;
   stoppedAt?: string;
@@ -23,7 +23,17 @@ interface Props {
   initialTargetType: 'pod' | 'service';
   initialTargetName: string;
   initialLocalPort: number;
-  initialTargetPort: number;
+  initialTargetPort: number | string;
+}
+
+function normalizeTargetPort(value: string): number | string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^\d+$/.test(trimmed)) {
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+  return /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(trimmed) ? trimmed : null;
 }
 
 export function PortForwardManager({
@@ -121,8 +131,8 @@ export function PortForwardManager({
     }
     if (!api?.portForwardStart) return;
     const lp = Number(localPort);
-    const tp = Number(targetPort);
-    if (!namespace.trim() || !targetName.trim() || !Number.isFinite(lp) || !Number.isFinite(tp)) {
+    const tp = normalizeTargetPort(targetPort);
+    if (!namespace.trim() || !targetName.trim() || !Number.isFinite(lp) || lp <= 0 || tp === null) {
       setError('Namespace, target, and valid ports are required.');
       return;
     }

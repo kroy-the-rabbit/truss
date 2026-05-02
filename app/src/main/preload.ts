@@ -16,7 +16,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     targetType?: 'pod' | 'service';
     targetName?: string;
     localPort?: number;
-    targetPort?: number;
+    targetPort?: number | string;
   }) => ipcRenderer.invoke('open-portforward-window', opts),
   portForwardList: () => ipcRenderer.invoke('port-forward-list'),
   portForwardStart: (opts: {
@@ -25,7 +25,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     targetType: 'pod' | 'service';
     targetName: string;
     localPort: number;
-    targetPort: number;
+    targetPort: number | string;
   }) => ipcRenderer.invoke('port-forward-start', opts),
   portForwardStop: (id: string) => ipcRenderer.invoke('port-forward-stop', id),
   portForwardOpenUrl: (id: string) => ipcRenderer.invoke('port-forward-open-url', id),

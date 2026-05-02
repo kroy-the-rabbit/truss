@@ -197,6 +197,13 @@ func summarizeIngress(obj *unstructured.Unstructured) []SummaryField {
 	seen := make(map[string]struct{})
 	var backends []string
 
+	if defaultBackend, found, _ := unstructured.NestedMap(obj.Object, "spec", "defaultBackend"); found {
+		if backend, ok := ingressBackendRef(defaultBackend); ok {
+			seen[backend] = struct{}{}
+			backends = append(backends, backend)
+		}
+	}
+
 	for _, r := range rules {
 		rm, ok := r.(map[string]interface{})
 		if !ok {
@@ -223,27 +230,11 @@ func summarizeIngress(obj *unstructured.Unstructured) []SummaryField {
 			if !ok {
 				continue
 			}
-			svcName := getString(svcObj, "name")
-			if svcName == "" {
-				continue
-			}
-			portObj, _ := svcObj["port"].(map[string]interface{})
-			var portStr string
-			if portObj != nil {
-				switch v := portObj["number"].(type) {
-				case int64:
-					portStr = fmt.Sprintf("%d", v)
-				case float64:
-					portStr = fmt.Sprintf("%d", int(v))
+			if backend, ok := ingressServiceBackendRef(svcObj); ok {
+				if _, exists := seen[backend]; !exists {
+					seen[backend] = struct{}{}
+					backends = append(backends, backend)
 				}
-			}
-			if portStr == "" {
-				continue
-			}
-			key := svcName + ":" + portStr
-			if _, exists := seen[key]; !exists {
-				seen[key] = struct{}{}
-				backends = append(backends, key)
 			}
 		}
 	}
@@ -259,6 +250,33 @@ func summarizeIngress(obj *unstructured.Unstructured) []SummaryField {
 		fields = append(fields, SummaryField{Key: "Backends", Value: strings.Join(backends, ", ")})
 	}
 	return fields
+}
+
+func ingressBackendRef(backendObj map[string]interface{}) (string, bool) {
+	svcObj, ok := backendObj["service"].(map[string]interface{})
+	if !ok {
+		return "", false
+	}
+	return ingressServiceBackendRef(svcObj)
+}
+
+func ingressServiceBackendRef(svcObj map[string]interface{}) (string, bool) {
+	svcName := getString(svcObj, "name")
+	if svcName == "" {
+		return "", false
+	}
+	portObj, _ := svcObj["port"].(map[string]interface{})
+	if portObj == nil {
+		return "", false
+	}
+	portStr := getString(portObj, "name")
+	if portStr == "" {
+		portStr = getString(portObj, "number")
+	}
+	if portStr == "" {
+		return "", false
+	}
+	return svcName + ":" + portStr, true
 }
 
 func summarizeService(obj *unstructured.Unstructured) []SummaryField {

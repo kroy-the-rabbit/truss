@@ -167,7 +167,7 @@ function IngressPortForwardSection({ resource }: { resource: Resource }) {
   const { activeContext } = useAppStore();
   const meta = resource.metadata;
 
-  // Parse backends from summarizer output: "svcname:80, svcname2:443" → [{name, port}]
+  // Parse backends from summarizer output: "svcname:80, svcname2:https" → [{name, port}]
   const backendsField = resource.summary.find((f) => f.key === 'Backends')?.value || '';
   const backends = backendsField
     .split(',')
@@ -177,22 +177,23 @@ function IngressPortForwardSection({ resource }: { resource: Resource }) {
       const idx = s.lastIndexOf(':');
       if (idx === -1) return null;
       const name = s.slice(0, idx);
-      const port = parseInt(s.slice(idx + 1), 10);
-      if (!name || !Number.isFinite(port) || port <= 0) return null;
+      const port = s.slice(idx + 1).trim();
+      if (!name || !port) return null;
       return { name, port };
     })
-    .filter((b): b is { name: string; port: number } => b !== null);
+    .filter((b): b is { name: string; port: string } => b !== null);
 
   if (!backends.length) return null;
 
-  const openForward = (svcName: string, port: number) => {
+  const openForward = (svcName: string, port: string) => {
+    const targetPort = /^\d+$/.test(port) ? Number(port) : port;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).electronAPI?.openPortForwardWindow?.({
       context: activeContext,
       namespace: meta?.namespace || '',
       targetType: 'service',
       targetName: svcName,
-      targetPort: port,
+      targetPort,
     });
   };
 

@@ -1,6 +1,6 @@
 {
   "name": "truss",
-  "version": "0.5.0",
+  "version": "0.5.8",
   "private": true,
   "author": "kroy <kroy@kroy.io>",
   "description": "Three-pane Kubernetes management desktop app",

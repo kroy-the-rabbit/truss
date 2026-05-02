@@ -14,6 +14,9 @@ type WatchMessage = {
 
 const RECONNECT_MS = 2000;
 const FLUSH_DEBOUNCE_MS = 250;
+const HEARTBEAT_CHECK_MS = 10000;
+const HEARTBEAT_TIMEOUT_MS = 55000;
+const FOREGROUND_REFETCH_AFTER_MS = 30000;
 
 function keyStr(v: unknown): string {
   return typeof v === 'string' ? v : '';
@@ -66,10 +69,12 @@ export function useLiveResourceInvalidation() {
 
   const flushTimerRef = useRef<number | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
+  const heartbeatTimerRef = useRef<number | null>(null);
   const selectedResourceRef = useRef(selectedResource);
   const selectedResourceNamespaceRef = useRef(selectedResourceNamespace);
   const selectedKindLabelRef = useRef(selectedKindLabel);
   const selectedKindRef = useRef(selectedKind);
+  const lastWatchMessageAtRef = useRef(0);
 
   useEffect(() => {
     selectedResourceRef.current = selectedResource;
@@ -110,6 +115,30 @@ export function useLiveResourceInvalidation() {
         window.clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
+      if (heartbeatTimerRef.current !== null) {
+        window.clearInterval(heartbeatTimerRef.current);
+        heartbeatTimerRef.current = null;
+      }
+    };
+
+    const invalidateActiveContextQueries = () => {
+      qc.invalidateQueries({
+        predicate: (q) => {
+          const k = q.queryKey as readonly unknown[];
+          const root = keyStr(k[0]);
+          if (keyStr(k[1]) !== activeContext) return false;
+          return root === 'cluster-overview' ||
+            root === 'namespaces' ||
+            root === 'resourceCounts' ||
+            root === 'resources' ||
+            root === 'resource' ||
+            root === 'yaml' ||
+            root === 'podInfo' ||
+            root === 'logs' ||
+            root === 'ownedPods' ||
+            root === 'events';
+        },
+      });
     };
 
     const flushPending = () => {
@@ -237,13 +266,32 @@ export function useLiveResourceInvalidation() {
           ['truss-watch-v1', `truss-token-${cfg.token}`],
         );
         ws = nextWs;
+        let lastMessageAt = Date.now();
+        lastWatchMessageAtRef.current = lastMessageAt;
+
+        if (heartbeatTimerRef.current !== null) {
+          window.clearInterval(heartbeatTimerRef.current);
+          heartbeatTimerRef.current = null;
+        }
 
         nextWs.onopen = () => {
-          if (!cancelled) setLiveUpdatesConnected(true);
+          if (!cancelled) {
+            lastMessageAt = Date.now();
+            lastWatchMessageAtRef.current = lastMessageAt;
+            setLiveUpdatesConnected(true);
+            heartbeatTimerRef.current = window.setInterval(() => {
+              if (cancelled || nextWs.readyState !== WebSocket.OPEN) return;
+              if (Date.now() - lastMessageAt <= HEARTBEAT_TIMEOUT_MS) return;
+              setLiveUpdatesConnected(false);
+              nextWs.close();
+            }, HEARTBEAT_CHECK_MS);
+          }
         };
 
         nextWs.onmessage = (evt) => {
           if (cancelled) return;
+          lastMessageAt = Date.now();
+          lastWatchMessageAtRef.current = lastMessageAt;
           let msg: WatchMessage | null = null;
           try {
             msg = JSON.parse(String(evt.data));
@@ -332,6 +380,10 @@ export function useLiveResourceInvalidation() {
 
         nextWs.onclose = () => {
           setLiveUpdatesConnected(false);
+          if (heartbeatTimerRef.current !== null) {
+            window.clearInterval(heartbeatTimerRef.current);
+            heartbeatTimerRef.current = null;
+          }
           if (cancelled) return;
           reconnectTimerRef.current = window.setTimeout(() => {
             void connect();
@@ -349,9 +401,27 @@ export function useLiveResourceInvalidation() {
 
     void connect();
 
+    let lastForegroundRefetchAt = 0;
+    const handleForeground = () => {
+      if (document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      if (now - lastForegroundRefetchAt < FOREGROUND_REFETCH_AFTER_MS) return;
+      if (lastWatchMessageAtRef.current > 0 && now - lastWatchMessageAtRef.current < FOREGROUND_REFETCH_AFTER_MS) return;
+      lastForegroundRefetchAt = now;
+      invalidateActiveContextQueries();
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+    };
+
+    window.addEventListener('focus', handleForeground);
+    document.addEventListener('visibilitychange', handleForeground);
+
     return () => {
       cancelled = true;
       setLiveUpdatesConnected(false);
+      window.removeEventListener('focus', handleForeground);
+      document.removeEventListener('visibilitychange', handleForeground);
       clearTimers();
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         ws.close();

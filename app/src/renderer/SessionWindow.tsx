@@ -46,7 +46,7 @@ function SessionContent() {
   const initialPfType = (params.get('targetType') === 'service' ? 'service' : 'pod') as 'pod' | 'service';
   const initialPfName = params.get('targetName') || '';
   const initialPfLocalPort = Number(params.get('localPort') || '8080') || 8080;
-  const initialPfTargetPort = Number(params.get('targetPort') || '8080') || 8080;
+  const initialPfTargetPort = params.get('targetPort') || '8080';
 
   const kindLabel = kind === 'logs'
     ? 'Logs'

@@ -258,9 +258,9 @@ func TestSummarizeCronJobFull(t *testing.T) {
 			"suspend":  false,
 		},
 		"status": map[string]interface{}{
-			"active":              []interface{}{map[string]interface{}{}, map[string]interface{}{}},
-			"lastScheduleTime":    "2026-02-24T12:00:00Z",
-			"lastSuccessfulTime":  "2026-02-24T11:00:00Z",
+			"active":             []interface{}{map[string]interface{}{}, map[string]interface{}{}},
+			"lastScheduleTime":   "2026-02-24T12:00:00Z",
+			"lastSuccessfulTime": "2026-02-24T11:00:00Z",
 		},
 	})
 	fields := Summarize("CronJob", obj)
@@ -596,11 +596,45 @@ func TestSummarizeIngressNoClass(t *testing.T) {
 	}
 }
 
+func TestSummarizeIngressDefaultBackendAndNamedPort(t *testing.T) {
+	obj := u(map[string]interface{}{
+		"spec": map[string]interface{}{
+			"defaultBackend": map[string]interface{}{
+				"service": map[string]interface{}{
+					"name": "fallback-svc",
+					"port": map[string]interface{}{"name": "http"},
+				},
+			},
+			"rules": []interface{}{
+				map[string]interface{}{
+					"host": "foo.example.com",
+					"http": map[string]interface{}{
+						"paths": []interface{}{
+							map[string]interface{}{
+								"backend": map[string]interface{}{
+									"service": map[string]interface{}{
+										"name": "svc",
+										"port": map[string]interface{}{"name": "https"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	fields := Summarize("Ingress", obj)
+	if got := mustField(t, fields, "Backends"); got != "fallback-svc:http, svc:https" {
+		t.Errorf("Backends = %q, want fallback-svc:http, svc:https", got)
+	}
+}
+
 func TestGetString(t *testing.T) {
 	m := map[string]interface{}{
-		"str":   "hello",
-		"num":   int64(42),
-		"bool":  true,
+		"str":  "hello",
+		"num":  int64(42),
+		"bool": true,
 	}
 	if got := getString(m, "str"); got != "hello" {
 		t.Errorf("getString(str) = %q, want hello", got)
