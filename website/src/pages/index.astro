@@ -1,18 +1,37 @@
 ---
 import BaseLayout from '@/layouts/BaseLayout.astro';
 
-const workbenchRows = [
-  ['Context', 'prod-east', 'read only', 'healthy'],
-  ['Namespace', 'payments', '12 deploys', '2 warnings'],
-  ['Focus', 'deploy/api-gateway', '3 replicas', 'live'],
+const resourceGroups = [
+  ['Overview', 'Cluster', ''],
+  ['Workloads', 'Pods', '214'],
+  ['Workloads', 'Deployments', '38'],
+  ['Workloads', 'StatefulSets', '7'],
+  ['Network', 'Services', '52'],
+  ['Network', 'Ingresses', '11'],
+  ['Packages', 'Helm Releases', '18'],
 ];
 
 const resourceRows = [
-  ['api-gateway', 'Deployment', '3/3', 'green'],
-  ['ledger-writer', 'StatefulSet', '2/2', 'green'],
-  ['refund-worker', 'Deployment', '1/2', 'amber'],
-  ['stripe-egress', 'Service', '443/TCP', 'green'],
-  ['public-web', 'Ingress', '3 hosts', 'green'],
+  ['api-gateway-7c8d9', 'payments', 'Running', '3/3', '12m', 'ok'],
+  ['ledger-writer-0', 'payments', 'Running', '2/2', '31m', 'ok'],
+  ['refund-worker-6f44', 'payments', 'CrashLoopBackOff', '1/2', '4m', 'err'],
+  ['stripe-egress-86bd', 'payments', 'Running', '1/1', '2h', 'ok'],
+  ['public-web-77d9', 'web', 'Pending', '0/1', '55s', 'warn'],
+];
+
+const summaryFields = [
+  ['Kind', 'Pod'],
+  ['Namespace', 'payments'],
+  ['Node', 'ip-10-42-7-19'],
+  ['Ready', '3/3'],
+  ['Restarts', '0'],
+  ['Age', '12m'],
+];
+
+const sessionRows = [
+  ['Logs', 'payments/api-gateway-7c8d9'],
+  ['Exec', 'payments/refund-worker-6f44'],
+  ['Port Forward', 'svc/stripe-egress 8080 -> 443'],
 ];
 
 const operatorNotes = [
@@ -26,7 +45,7 @@ const operatorNotes = [
   },
   {
     title: 'Fast without hiding kubectl',
-    body: 'Logs, exec, file transfer, YAML diffing, Helm history, events, and port-forwards live where operators already look.',
+    body: 'Logs, exec, file transfer, YAML diffing, Helm history, events, and port-forwards open as focused app windows instead of crowding the inspector.',
   },
 ];
 
@@ -98,89 +117,134 @@ const lanes = [
       </div>
 
       <div class="relative">
-        <div class="max-h-[250px] overflow-hidden rounded-lg border border-zinc-900 bg-zinc-950 shadow-2xl shadow-zinc-900/20 sm:max-h-none dark:border-zinc-700">
-          <div class="flex h-10 items-center gap-2 border-b border-zinc-800 bg-zinc-900 px-4">
-            <span class="h-3 w-3 rounded-full bg-red-500" aria-hidden="true"></span>
-            <span class="h-3 w-3 rounded-full bg-amber-400" aria-hidden="true"></span>
-            <span class="h-3 w-3 rounded-full bg-emerald-500" aria-hidden="true"></span>
-            <span class="ml-3 text-xs font-semibold text-zinc-400">prod-east / payments / api-gateway</span>
-            <span class="ml-auto rounded bg-emerald-500 px-2 py-0.5 text-[11px] font-black uppercase text-zinc-950">Read only</span>
+        <div class="max-h-[300px] overflow-hidden rounded-md border border-[#45475a] bg-[#1e1e2e] shadow-2xl shadow-zinc-900/20 sm:max-h-none dark:border-[#45475a]">
+          <div class="flex h-9 items-center justify-between border-b border-[#45475a] bg-[#181825] px-3 text-[11px] text-[#a6adc8]">
+            <div class="flex items-center gap-2">
+              <span class="h-2 w-2 rounded-full bg-[#7cc9ff]" aria-hidden="true"></span>
+              <span class="font-bold text-[#89b4fa]">Truss</span>
+              <span class="rounded-full border border-[#45475a] px-2 py-0.5 font-semibold">default</span>
+            </div>
+            <div class="hidden items-center gap-3 md:flex">
+              <span>Context: prod-east</span>
+              <span class="rounded border border-[#45475a] px-2 py-0.5">Vault</span>
+              <span class="rounded border border-[#45475a] px-2 py-0.5">Preferences</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="rounded-full border border-[#89b4fa] px-2 py-0.5 font-bold text-[#89b4fa]">RO</span>
+              <span class="hidden text-[#6c7086] sm:inline">Ctrl+P or : Command, / Search</span>
+            </div>
           </div>
 
-          <div class="grid min-h-[520px] grid-cols-1 lg:grid-cols-[210px_245px_minmax(0,1fr)]">
-            <aside class="border-b border-zinc-800 bg-zinc-900/80 p-4 lg:border-b-0 lg:border-r">
-              <p class="mb-4 text-xs font-bold uppercase text-zinc-500">Cluster map</p>
-              <div class="space-y-2 text-sm">
-                {workbenchRows.map(([label, value, meta, status]) => (
-                  <div class="rounded-md border border-zinc-800 bg-zinc-950 p-3">
-                    <div class="flex items-center justify-between gap-3">
-                      <span class="text-xs uppercase text-zinc-500">{label}</span>
-                      <span class:list={['h-2 w-2 rounded-full', status === 'healthy' || status === 'live' ? 'bg-emerald-400' : 'bg-amber-400']} aria-hidden="true"></span>
-                    </div>
-                    <div class="mt-1 font-bold text-zinc-100">{value}</div>
-                    <div class="mt-1 text-xs text-zinc-500">{meta}</div>
+          <div class="flex h-6 items-center border-b border-[#45475a] bg-[#1e1e2e] px-3 text-[11px] text-[#a6adc8]">
+            <span class="text-[#89b4fa]">prod-east</span>
+            <span class="mx-1 text-[#6c7086]">/</span>
+            <span>payments</span>
+            <span class="mx-1 text-[#6c7086]">/</span>
+            <span class="font-semibold text-[#cdd6f4]">Pods</span>
+            <span class="mx-1 text-[#6c7086]">/</span>
+            <span class="font-semibold text-[#cdd6f4]">api-gateway-7c8d9</span>
+          </div>
+
+          <div class="grid min-h-[500px] grid-cols-1 lg:grid-cols-[190px_minmax(250px,1fr)_minmax(280px,0.92fr)]">
+            <aside class="border-b border-[#45475a] bg-[#181825] lg:border-b-0 lg:border-r">
+              <div class="border-b border-[#45475a] px-3 py-2 text-xs font-bold text-[#a6adc8]">Resources</div>
+              <div class="py-2 text-xs">
+                {resourceGroups.map(([group, label, count], index) => (
+                  <div class:list={['flex items-center justify-between px-3 py-1.5', label === 'Pods' ? 'bg-[#585b70] text-[#89b4fa]' : 'text-[#cdd6f4]']}>
+                    <span class={index === 0 ? 'font-semibold' : ''}>
+                      {index === 0 ? label : `${group} / ${label}`}
+                    </span>
+                    {count && <span class="text-[#6c7086]">{count}</span>}
                   </div>
                 ))}
               </div>
             </aside>
 
-            <section class="border-b border-zinc-800 bg-zinc-950 p-4 lg:border-b-0 lg:border-r">
-              <div class="mb-4 flex items-center justify-between">
-                <p class="text-xs font-bold uppercase text-zinc-500">Resources</p>
-                <span class="rounded bg-zinc-800 px-2 py-1 text-[11px] font-semibold text-zinc-300">live</span>
+            <section class="border-b border-[#45475a] bg-[#1e1e2e] lg:border-b-0 lg:border-r">
+              <div class="flex items-center justify-between gap-3 border-b border-[#45475a] bg-[#181825] px-3 py-2 text-xs">
+                <span class="font-bold text-[#a6adc8]">Namespace: payments</span>
+                <span class="rounded border border-[#45475a] px-2 py-0.5 text-[#6c7086]">5/214</span>
               </div>
-              <div class="space-y-2">
-                {resourceRows.map(([name, kind, ready, state]) => (
-                  <div class:list={['rounded-md border p-3 text-sm', name === 'api-gateway' ? 'border-teal-400 bg-teal-950/40' : 'border-zinc-800 bg-zinc-900/50']}>
-                    <div class="flex items-center gap-2">
-                      <span class:list={['h-2 w-2 rounded-full', state === 'green' ? 'bg-emerald-400' : 'bg-amber-400']} aria-hidden="true"></span>
-                      <span class="font-bold text-zinc-100">{name}</span>
-                    </div>
-                    <div class="mt-2 flex items-center justify-between text-xs text-zinc-500">
-                      <span>{kind}</span>
-                      <span>{ready}</span>
-                    </div>
+              <div class="flex items-center gap-2 border-b border-[#45475a] px-3 py-2 text-xs">
+                <span class="font-bold text-[#89b4fa]">Pods</span>
+                <span class="flex-1 rounded border border-[#45475a] bg-[#313244] px-2 py-1 text-[#6c7086]">Filter by name...</span>
+                <span class="rounded-full bg-[#1f3b45] px-2 py-0.5 text-[#7cc9ff]">3</span>
+                <span class="rounded-full bg-[#3f3529] px-2 py-0.5 text-[#fab387]">1</span>
+                <span class="rounded-full bg-[#3c2b42] px-2 py-0.5 text-[#caa6ff]">1</span>
+              </div>
+              <div class="text-[11px]">
+                <div class="grid grid-cols-[1.7fr_1fr_1.1fr_0.7fr] border-b border-[#45475a] bg-[#181825] px-3 py-1.5 font-bold text-[#6c7086]">
+                  <span>Name</span>
+                  <span>Namespace</span>
+                  <span>Status</span>
+                  <span class="text-right">Age</span>
+                </div>
+                {resourceRows.map(([name, ns, status, ready, age, state]) => (
+                  <div class:list={['grid grid-cols-[1.7fr_1fr_1.1fr_0.7fr] border-b border-[#313244] px-3 py-2', name === 'api-gateway-7c8d9' ? 'bg-[#585b70] text-[#cdd6f4] outline outline-1 -outline-offset-1 outline-[#89b4fa]' : 'text-[#cdd6f4]']}>
+                    <span class="truncate font-semibold">{name}</span>
+                    <span class="truncate text-[#a6adc8]">{ns}</span>
+                    <span class="flex items-center gap-1 truncate">
+                      <span class:list={['h-1.5 w-1.5 rounded-full', state === 'ok' ? 'bg-[#7cc9ff]' : state === 'warn' ? 'bg-[#fab387]' : 'bg-[#caa6ff]']} aria-hidden="true"></span>
+                      <span>{status}</span>
+                      <span class="text-[#6c7086]">{ready}</span>
+                    </span>
+                    <span class="text-right text-[#6c7086]">{age}</span>
                   </div>
                 ))}
               </div>
             </section>
 
-            <section class="bg-[#10100f] p-4">
-              <div class="mb-4 flex flex-wrap items-center gap-2">
-                {['Summary', 'YAML', 'Logs', 'Exec', 'Port-forward'].map((tab) => (
-                  <span class:list={['rounded px-2.5 py-1 text-xs font-bold', tab === 'Logs' ? 'bg-teal-400 text-zinc-950' : 'bg-zinc-800 text-zinc-300']}>{tab}</span>
-                ))}
-              </div>
-
-              <div class="rounded-md border border-zinc-800 bg-zinc-950">
-                <div class="border-b border-zinc-800 px-4 py-3">
-                  <div class="flex items-center justify-between gap-4">
-                    <div>
-                      <p class="text-sm font-black text-zinc-100">api-gateway</p>
-                      <p class="text-xs text-zinc-500">deployments.apps/v1 - payments</p>
-                    </div>
-                    <span class="rounded bg-zinc-800 px-2 py-1 text-xs font-bold text-amber-300">2 warnings</span>
+            <section class="bg-[#1e1e2e]">
+              <div class="border-b border-[#45475a] bg-[#181825] px-3 py-2">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <div class="text-[11px] font-bold text-[#6c7086]">Pod</div>
+                    <div class="truncate text-sm font-bold text-[#cdd6f4]">api-gateway-7c8d9</div>
+                    <div class="text-[11px] text-[#a6adc8]">payments</div>
+                  </div>
+                  <div class="flex flex-wrap justify-end gap-1 text-[11px]">
+                    {['Data', 'YAML', 'Scale', 'Restart', 'Delete'].map((action) => (
+                      <span class:list={['rounded border px-2 py-1 font-semibold', action === 'Delete' ? 'border-[#caa6ff] text-[#caa6ff] opacity-40' : 'border-[#45475a] text-[#a6adc8]']}>{action}</span>
+                    ))}
                   </div>
                 </div>
-                <div class="grid grid-cols-1 gap-0 md:grid-cols-[1fr_150px]">
-                  <pre class="min-h-[280px] overflow-hidden p-4 text-[12px] leading-6 text-zinc-300"><code><span class="text-zinc-500">14:02:11</span> started container api
-<span class="text-zinc-500">14:02:12</span> connected to redis-primary
-<span class="text-zinc-500">14:03:48</span> <span class="text-amber-300">warn</span> upstream timeout /ledger
-<span class="text-zinc-500">14:03:49</span> retry succeeded in 182ms
-<span class="text-zinc-500">14:04:02</span> <span class="text-emerald-300">ok</span> readiness probe passed
-<span class="text-zinc-500">14:04:07</span> port-forward 127.0.0.1:8080
-<span class="text-zinc-500">14:04:11</span> tailing logs from 3 pods</code></pre>
-                  <div class="border-t border-zinc-800 p-4 md:border-l md:border-t-0">
-                    <p class="text-xs font-bold uppercase text-zinc-500">Actions</p>
-                    <div class="mt-3 space-y-2">
-                      {['Diff YAML', 'Open shell', 'Copy logs', 'Forward 8080'].map((action) => (
-                        <span class="block rounded border border-zinc-700 px-3 py-2 text-xs font-bold text-zinc-200">{action}</span>
-                      ))}
+              </div>
+              <div class="flex gap-1 border-b border-[#45475a] bg-[#181825] px-3 py-2 text-xs">
+                {['Summary', 'Data', 'YAML', 'Events', 'Pods'].map((tab) => (
+                  <span class:list={['rounded px-2 py-1 font-semibold', tab === 'Summary' ? 'bg-[#585b70] text-[#89b4fa]' : 'text-[#a6adc8]']}>{tab}</span>
+                ))}
+              </div>
+              <div class="p-3">
+                <div class="grid grid-cols-2 gap-2 text-xs">
+                  {summaryFields.map(([key, value]) => (
+                    <div class="rounded border border-[#45475a] bg-[#313244] p-2">
+                      <div class="text-[10px] uppercase text-[#6c7086]">{key}</div>
+                      <div class="mt-1 font-semibold text-[#cdd6f4]">{value}</div>
                     </div>
-                  </div>
+                  ))}
+                </div>
+                <div class="mt-3 rounded border border-[#45475a] bg-[#11111b] p-3 text-[11px] leading-5 text-[#a6adc8]">
+                  <div><span class="text-[#7cc9ff]">Ready</span> all containers passing probes</div>
+                  <div><span class="text-[#fab387]">Event</span> one sibling pod is backoff-looping</div>
+                  <div><span class="text-[#89b4fa]">Owner</span> deployment/api-gateway</div>
                 </div>
               </div>
             </section>
+          </div>
+        </div>
+
+        <div class="absolute -bottom-8 right-4 hidden w-[360px] rounded-md border border-[#45475a] bg-[#11111b] shadow-xl shadow-zinc-950/30 xl:block" aria-hidden="true">
+          <div class="flex items-center justify-between border-b border-[#45475a] px-3 py-2 text-xs">
+            <span class="font-bold text-[#cdd6f4]">Session windows</span>
+            <span class="text-[#6c7086]">logs / exec / port-forward</span>
+          </div>
+          <div class="space-y-2 p-3 text-xs">
+            {sessionRows.map(([kind, target]) => (
+              <div class="flex items-center justify-between rounded border border-[#313244] bg-[#1e1e2e] px-3 py-2">
+                <span class="font-semibold text-[#89b4fa]">{kind}</span>
+                <span class="truncate pl-3 text-[#a6adc8]">{target}</span>
+              </div>
+            ))}
           </div>
         </div>
       </div>
