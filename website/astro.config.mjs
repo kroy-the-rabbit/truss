@@ -4,6 +4,9 @@ import tailwind from '@astrojs/tailwind';
 
 export default defineConfig({
   site: 'https://truss.kroy.io',
+  vite: {
+    cacheDir: '.astro/vite',
+  },
   integrations: [
     mdx(),
     tailwind({ applyBaseStyles: false }),

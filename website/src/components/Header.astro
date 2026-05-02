@@ -4,15 +4,15 @@ import { siteNav } from '@/lib/nav';
 
 <header
   id="site-header"
-  class="sticky top-0 z-50 w-full border-b border-gray-200/80 bg-white/90 backdrop-blur-md
-         dark:border-gray-800/80 dark:bg-gray-950/90"
+  class="sticky top-0 z-50 w-full border-b border-zinc-300/80 bg-[#f7f8f4]/90 backdrop-blur-md
+         dark:border-zinc-800/80 dark:bg-zinc-950/90"
 >
   <div class="mx-auto flex h-14 max-w-7xl items-center gap-6 px-4 sm:px-6 lg:px-8">
     <!-- Logo -->
     <a
       href="/"
-      class="flex items-center gap-2.5 shrink-0 font-bold text-gray-900 dark:text-white
-             hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
+      class="flex items-center gap-2.5 shrink-0 font-black text-zinc-950 dark:text-white
+             hover:text-teal-700 dark:hover:text-teal-300 transition-colors"
       aria-label="Truss home"
     >
       <svg
@@ -44,7 +44,7 @@ import { siteNav } from '@/lib/nav';
           <path d="M420 808H604Q620 808 620 824V844Q620 860 604 860H420Q404 860 404 844V824Q404 808 420 808Z" fill="#005A5A" opacity=".9"/>
         </g>
       </svg>
-      <span class="text-base tracking-tight">Truss</span>
+      <span class="text-base tracking-normal">Truss</span>
     </a>
 
     <!-- Nav -->
@@ -54,8 +54,8 @@ import { siteNav } from '@/lib/nav';
           href={link.href}
           target={link.external ? '_blank' : undefined}
           rel={link.external ? 'noopener noreferrer' : undefined}
-          class="px-3 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-400
-                 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800
+          class="px-3 py-1.5 text-sm font-bold text-zinc-600 dark:text-zinc-400
+                 hover:text-zinc-950 dark:hover:text-white hover:bg-white dark:hover:bg-zinc-900
                  rounded-md transition-colors"
         >
           {link.title}
@@ -71,8 +71,8 @@ import { siteNav } from '@/lib/nav';
       <button
         id="theme-toggle"
         aria-label="Toggle dark mode"
-        class="p-2 rounded-md text-gray-500 hover:text-gray-900 dark:text-gray-400
-               dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800
+        class="p-2 rounded-md text-zinc-500 hover:text-zinc-950 dark:text-zinc-400
+               dark:hover:text-white hover:bg-white dark:hover:bg-zinc-900
                transition-colors"
       >
         <svg id="icon-sun" class="h-4 w-4 hidden dark:block" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -92,8 +92,8 @@ import { siteNav } from '@/lib/nav';
         target="_blank"
         rel="noopener noreferrer"
         class="hidden sm:inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md
-               bg-teal-600 hover:bg-teal-700 active:bg-teal-800
-               text-white text-sm font-semibold transition-colors shadow-sm"
+               bg-zinc-950 hover:bg-zinc-800 active:bg-zinc-700
+               text-white text-sm font-black transition-colors shadow-sm dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
       >
         Download
       </a>
@@ -103,7 +103,7 @@ import { siteNav } from '@/lib/nav';
         id="mobile-menu-btn"
         aria-label="Open menu"
         aria-expanded="false"
-        class="sm:hidden p-2 rounded-md text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+        class="sm:hidden p-2 rounded-md text-zinc-500 hover:bg-white dark:hover:bg-zinc-900 transition-colors"
       >
         <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
           <line x1="3" y1="6" x2="21" y2="6"/>
@@ -117,7 +117,7 @@ import { siteNav } from '@/lib/nav';
   <!-- Mobile nav drawer -->
   <div
     id="mobile-menu"
-    class="hidden sm:hidden border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 px-4 py-3"
+    class="hidden sm:hidden border-t border-zinc-300 bg-[#f7f8f4] px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950"
   >
     <nav class="flex flex-col gap-1" aria-label="Mobile navigation">
       {siteNav.map(link => (
@@ -125,8 +125,8 @@ import { siteNav } from '@/lib/nav';
           href={link.href}
           target={link.external ? '_blank' : undefined}
           rel={link.external ? 'noopener noreferrer' : undefined}
-          class="px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300
-                 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors"
+          class="px-3 py-2 text-sm font-bold text-zinc-700 dark:text-zinc-300
+                 hover:bg-white dark:hover:bg-zinc-900 rounded-md transition-colors"
         >
           {link.title}
           {link.external && <span class="ml-1 opacity-50" aria-hidden="true">↗</span>}
@@ -134,7 +134,7 @@ import { siteNav } from '@/lib/nav';
       ))}
       <a
         href="https://github.com/kroy-the-rabbit/truss/releases/latest"
-        class="mt-2 px-3 py-2 text-sm font-semibold text-white bg-teal-600 rounded-md text-center"
+        class="mt-2 px-3 py-2 text-sm font-black text-white bg-zinc-950 rounded-md text-center dark:bg-white dark:text-zinc-950"
       >
         Download
       </a>
