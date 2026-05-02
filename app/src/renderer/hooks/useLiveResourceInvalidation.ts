@@ -103,6 +103,7 @@ export function useLiveResourceInvalidation() {
       logsForPods: new Set<string>(),
       ownedPodsNamespaces: new Set<string>(),
       eventsForObjects: new Set<string>(),
+      helmNamespaces: new Set<string>(),
       allEventsForContext: false,
     };
 
@@ -136,7 +137,11 @@ export function useLiveResourceInvalidation() {
             root === 'podInfo' ||
             root === 'logs' ||
             root === 'ownedPods' ||
-            root === 'events';
+            root === 'events' ||
+            root === 'helmReleases' ||
+            root === 'helmRelease' ||
+            root === 'helmReleaseValues' ||
+            root === 'helmReleaseHistory';
         },
       });
     };
@@ -228,6 +233,18 @@ export function useLiveResourceInvalidation() {
           },
         });
       }
+      if (pending.helmNamespaces.size > 0) {
+        qc.invalidateQueries({
+          predicate: (q) => {
+            const k = q.queryKey as readonly unknown[];
+            const root = keyStr(k[0]);
+            if (!['helmReleases', 'helmRelease', 'helmReleaseValues', 'helmReleaseHistory'].includes(root)) return false;
+            if (keyStr(k[1]) !== activeContext) return false;
+            const queryNamespace = keyStr(k[2]);
+            return queryNamespace === '' || pending.helmNamespaces.has(queryNamespace);
+          },
+        });
+      }
 
       pending.overview = false;
       pending.namespaces = false;
@@ -240,6 +257,7 @@ export function useLiveResourceInvalidation() {
       pending.logsForPods.clear();
       pending.ownedPodsNamespaces.clear();
       pending.eventsForObjects.clear();
+      pending.helmNamespaces.clear();
     };
 
     const scheduleFlush = () => {
@@ -349,6 +367,9 @@ export function useLiveResourceInvalidation() {
 
           if ((msgGroup === 'events.k8s.io' && msgResource === 'events') || (!msgGroup && msgResource === 'events')) {
             pending.allEventsForContext = true;
+          }
+          if (!msgGroup && (msgResource === 'secrets' || msgResource === 'configmaps')) {
+            pending.helmNamespaces.add(msgNS);
           }
 
           const currentSelectedResource = selectedResourceRef.current;

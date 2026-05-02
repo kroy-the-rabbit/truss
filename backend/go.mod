@@ -5,7 +5,7 @@ go 1.25.7
 require (
 	connectrpc.com/connect v1.19.1
 	golang.org/x/crypto v0.48.0
-	golang.org/x/net v0.50.0
+	golang.org/x/net v0.51.0
 	google.golang.org/protobuf v1.36.9
 	helm.sh/helm/v3 v3.20.0
 	k8s.io/api v0.35.1

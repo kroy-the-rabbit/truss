@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import type { QueryClient } from '@tanstack/react-query';
 import {
   getContextsClient,
   getDiscoveryClient,
@@ -26,6 +27,59 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, message: string):
 
 function fallbackInterval(liveConnected: boolean, disconnectedMs: number, connectedMs = 60000): number {
   return liveConnected ? connectedMs : disconnectedMs;
+}
+
+type QueryInvalidator = Pick<QueryClient, 'invalidateQueries'>;
+
+function keyStr(v: unknown): string {
+  return typeof v === 'string' ? v : '';
+}
+
+const RESOURCE_READ_QUERY_ROOTS = new Set([
+  'cluster-overview',
+  'namespaces',
+  'resourceCounts',
+  'resources',
+  'resource',
+  'yaml',
+  'podInfo',
+  'logs',
+  'ownedPods',
+  'events',
+]);
+
+const HELM_QUERY_ROOTS = new Set([
+  'helmReleases',
+  'helmRelease',
+  'helmReleaseValues',
+  'helmReleaseHistory',
+]);
+
+function queryKeyMatchesContextAndNamespace(queryKey: readonly unknown[], context?: string, namespace?: string): boolean {
+  if (context && keyStr(queryKey[1]) !== context) return false;
+  if (!namespace) return true;
+  const queryNamespace = keyStr(queryKey[2]);
+  return queryNamespace === '' || queryNamespace === namespace;
+}
+
+export function invalidateResourceViews(queryClient: QueryInvalidator, opts: { context?: string; namespace?: string } = {}) {
+  queryClient.invalidateQueries({
+    predicate: (q) => {
+      const queryKey = q.queryKey as readonly unknown[];
+      const root = keyStr(queryKey[0]);
+      return RESOURCE_READ_QUERY_ROOTS.has(root) && queryKeyMatchesContextAndNamespace(queryKey, opts.context, opts.namespace);
+    },
+  });
+}
+
+export function invalidateHelmViews(queryClient: QueryInvalidator, opts: { context?: string; namespace?: string } = {}) {
+  queryClient.invalidateQueries({
+    predicate: (q) => {
+      const queryKey = q.queryKey as readonly unknown[];
+      const root = keyStr(queryKey[0]);
+      return HELM_QUERY_ROOTS.has(root) && queryKeyMatchesContextAndNamespace(queryKey, opts.context, opts.namespace);
+    },
+  });
 }
 
 export function usePing() {
@@ -113,10 +167,9 @@ export function useSetActiveProfile() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['profiles'] });
       queryClient.invalidateQueries({ queryKey: ['contexts'] });
-      queryClient.invalidateQueries({ queryKey: ['namespaces'] });
       queryClient.invalidateQueries({ queryKey: ['resourceKinds'] });
-      queryClient.invalidateQueries({ queryKey: ['resources'] });
-      queryClient.invalidateQueries({ queryKey: ['resource'] });
+      invalidateResourceViews(queryClient);
+      invalidateHelmViews(queryClient);
     },
   });
 }
@@ -128,11 +181,12 @@ export function useSetActiveContext() {
       const client = await getContextsClient();
       return client.setActiveContext({ name });
     },
-    onSuccess: () => {
+    onSuccess: (_data, context) => {
       queryClient.invalidateQueries({ queryKey: ['contexts'] });
       queryClient.invalidateQueries({ queryKey: ['namespaces'] });
       queryClient.invalidateQueries({ queryKey: ['resourceKinds'] });
-      queryClient.invalidateQueries({ queryKey: ['resources'] });
+      invalidateResourceViews(queryClient, { context });
+      invalidateHelmViews(queryClient, { context });
     },
   });
 }
@@ -231,10 +285,9 @@ export function useApplyYaml() {
         fieldManager: 'truss',
       });
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['resources'] });
-      queryClient.invalidateQueries({ queryKey: ['resource'] });
-      queryClient.invalidateQueries({ queryKey: ['yaml'] });
+    onSuccess: (_data, params) => {
+      invalidateResourceViews(queryClient, { context: params.context, namespace: params.namespace });
+      invalidateHelmViews(queryClient, { context: params.context, namespace: params.namespace });
     },
   });
 }
@@ -358,8 +411,9 @@ export function useDeleteResource() {
         gracePeriodSeconds: params.gracePeriod ?? -1,
       });
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['resources'] });
+    onSuccess: (_data, params) => {
+      invalidateResourceViews(queryClient, { context: params.context, namespace: params.namespace });
+      invalidateHelmViews(queryClient, { context: params.context, namespace: params.namespace });
     },
   });
 }
@@ -377,10 +431,8 @@ export function useScaleResource() {
         replicas: params.replicas,
       });
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['resources'] });
-      queryClient.invalidateQueries({ queryKey: ['resource'] });
-      queryClient.invalidateQueries({ queryKey: ['resourceCounts'] });
+    onSuccess: (_data, params) => {
+      invalidateResourceViews(queryClient, { context: params.context, namespace: params.namespace });
     },
   });
 }
@@ -397,9 +449,8 @@ export function useRestartResource() {
         name: params.name,
       });
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['resources'] });
-      queryClient.invalidateQueries({ queryKey: ['resource'] });
+    onSuccess: (_data, params) => {
+      invalidateResourceViews(queryClient, { context: params.context, namespace: params.namespace });
     },
   });
 }
@@ -407,6 +458,7 @@ export function useRestartResource() {
 // --- Helm ---
 
 export function useHelmReleases(context: string, namespace: string) {
+  const liveConnected = useAppStore((s) => s.liveUpdatesConnected);
   return useQuery({
     queryKey: ['helmReleases', context, namespace],
     queryFn: async () => {
@@ -414,11 +466,12 @@ export function useHelmReleases(context: string, namespace: string) {
       return client.listReleases({ context, namespace });
     },
     enabled: !!context,
-    refetchInterval: 30000,
+    refetchInterval: fallbackInterval(liveConnected, 30000),
   });
 }
 
 export function useHelmRelease(context: string, namespace: string, name: string) {
+  const liveConnected = useAppStore((s) => s.liveUpdatesConnected);
   return useQuery({
     queryKey: ['helmRelease', context, namespace, name],
     queryFn: async () => {
@@ -426,10 +479,12 @@ export function useHelmRelease(context: string, namespace: string, name: string)
       return client.getRelease({ context, namespace, name });
     },
     enabled: !!context && !!name && !!namespace,
+    refetchInterval: fallbackInterval(liveConnected, 30000),
   });
 }
 
 export function useHelmReleaseValues(context: string, namespace: string, name: string) {
+  const liveConnected = useAppStore((s) => s.liveUpdatesConnected);
   return useQuery({
     queryKey: ['helmReleaseValues', context, namespace, name],
     queryFn: async () => {
@@ -437,10 +492,12 @@ export function useHelmReleaseValues(context: string, namespace: string, name: s
       return client.getReleaseValues({ context, namespace, name });
     },
     enabled: !!context && !!name && !!namespace,
+    refetchInterval: fallbackInterval(liveConnected, 30000),
   });
 }
 
 export function useHelmReleaseHistory(context: string, namespace: string, name: string) {
+  const liveConnected = useAppStore((s) => s.liveUpdatesConnected);
   return useQuery({
     queryKey: ['helmReleaseHistory', context, namespace, name],
     queryFn: async () => {
@@ -448,6 +505,7 @@ export function useHelmReleaseHistory(context: string, namespace: string, name: 
       return client.getReleaseHistory({ context, namespace, name });
     },
     enabled: !!context && !!name && !!namespace,
+    refetchInterval: fallbackInterval(liveConnected, 30000),
   });
 }
 
@@ -458,9 +516,9 @@ export function useUninstallRelease() {
       const client = await getHelmClient();
       return client.uninstallRelease(params);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['helmReleases'] });
-      queryClient.invalidateQueries({ queryKey: ['helmRelease'] });
+    onSuccess: (_data, params) => {
+      invalidateHelmViews(queryClient, { context: params.context, namespace: params.namespace });
+      invalidateResourceViews(queryClient, { context: params.context, namespace: params.namespace });
     },
   });
 }
@@ -472,10 +530,9 @@ export function useRollbackRelease() {
       const client = await getHelmClient();
       return client.rollbackRelease(params);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['helmReleases'] });
-      queryClient.invalidateQueries({ queryKey: ['helmRelease'] });
-      queryClient.invalidateQueries({ queryKey: ['helmReleaseHistory'] });
+    onSuccess: (_data, params) => {
+      invalidateHelmViews(queryClient, { context: params.context, namespace: params.namespace });
+      invalidateResourceViews(queryClient, { context: params.context, namespace: params.namespace });
     },
   });
 }
@@ -513,11 +570,9 @@ export function useUpgradeRelease() {
       const client = await getHelmClient();
       return client.upgradeRelease(params);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['helmReleases'] });
-      queryClient.invalidateQueries({ queryKey: ['helmRelease'] });
-      queryClient.invalidateQueries({ queryKey: ['helmReleaseHistory'] });
-      queryClient.invalidateQueries({ queryKey: ['helmReleaseValues'] });
+    onSuccess: (_data, params) => {
+      invalidateHelmViews(queryClient, { context: params.context, namespace: params.namespace });
+      invalidateResourceViews(queryClient, { context: params.context, namespace: params.namespace });
     },
   });
 }
@@ -529,9 +584,8 @@ export function useCordonNode() {
       const client = await getResourcesClient();
       return client.cordonNode(params);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['resources'] });
-      queryClient.invalidateQueries({ queryKey: ['resource'] });
+    onSuccess: (_data, params) => {
+      invalidateResourceViews(queryClient, { context: params.context });
     },
   });
 }
@@ -543,9 +597,8 @@ export function useUncordonNode() {
       const client = await getResourcesClient();
       return client.uncordonNode(params);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['resources'] });
-      queryClient.invalidateQueries({ queryKey: ['resource'] });
+    onSuccess: (_data, params) => {
+      invalidateResourceViews(queryClient, { context: params.context });
     },
   });
 }
@@ -557,9 +610,8 @@ export function useDrainNode() {
       const client = await getResourcesClient();
       return client.drainNode({ context: params.context, name: params.name, ignoreDaemonsets: params.ignoreDaemonsets ?? true });
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['resources'] });
-      queryClient.invalidateQueries({ queryKey: ['resource'] });
+    onSuccess: (_data, params) => {
+      invalidateResourceViews(queryClient, { context: params.context });
     },
   });
 }
@@ -571,9 +623,8 @@ export function useTriggerCronJob() {
       const client = await getResourcesClient();
       return client.triggerCronJob(params);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['resources'] });
-      queryClient.invalidateQueries({ queryKey: ['resource'] });
+    onSuccess: (_data, params) => {
+      invalidateResourceViews(queryClient, { context: params.context, namespace: params.namespace });
     },
   });
 }
@@ -685,6 +736,7 @@ export interface NodeDebugResult {
 }
 
 export function useDebugNode() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (params: {
       context: string;
@@ -708,10 +760,14 @@ export function useDebugNode() {
       }
       return r.json();
     },
+    onSuccess: (_data, params) => {
+      invalidateResourceViews(queryClient, { context: params.context, namespace: params.namespace ?? 'default' });
+    },
   });
 }
 
 export function useDeleteDebugPod() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (params: { context: string; pod: string; namespace: string }) => {
       const qs = new URLSearchParams({ context: params.context, pod: params.pod, namespace: params.namespace });
@@ -720,6 +776,9 @@ export function useDeleteDebugPod() {
         const err = await r.json().catch(() => ({ error: 'unknown error' })) as { error?: string };
         throw new Error(err.error ?? 'failed to delete debug pod');
       }
+    },
+    onSuccess: (_data, params) => {
+      invalidateResourceViews(queryClient, { context: params.context, namespace: params.namespace });
     },
   });
 }
