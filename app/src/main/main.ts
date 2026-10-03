@@ -6,6 +6,7 @@ import path from 'path';
 import { startDaemon, stopDaemon, DaemonConfig, enrichPath } from './daemon';
 import { readPluginFileUtf8 } from './pluginFs';
 import { ApprovedRoots, assertInsideApprovedRoot } from './pathSafety';
+import { assertTrustedSender, installSecurityGuards } from './security';
 
 let mainWindow: BrowserWindow | null = null;
 let daemonConfig: DaemonConfig | null = null;
@@ -971,7 +972,8 @@ ipcMain.handle('port-forward-open-url', (_event, id: string) => {
 });
 
 // Handle daemon config requests from renderer.
-ipcMain.handle('get-daemon-config', () => {
+ipcMain.handle('get-daemon-config', (event) => {
+  assertTrustedSender(event);
   return daemonConfig;
 });
 
@@ -1024,7 +1026,8 @@ function shellEscapeCmd(arg: string): string {
   return `"${arg.replace(/[%^&|<>()!"]/g, '^$&')}"`;
 }
 
-ipcMain.handle('open-external-terminal', (_event, opts: Record<string, unknown>) => {
+ipcMain.handle('open-external-terminal', (event, opts: Record<string, unknown>) => {
+  assertTrustedSender(event);
   const { type, context, namespace, pod, container, tailLines, timestamps } = opts as {
     type: string;
     context: string;
@@ -1242,7 +1245,8 @@ function writeEnabledMap(map: Record<string, boolean>): void {
 }
 
 // plugin-list: discover plugin directories and return PluginRecord[] compatible objects.
-ipcMain.handle('plugin-list', () => {
+ipcMain.handle('plugin-list', (event) => {
+  assertTrustedSender(event);
   const pluginsDir = getPluginsDir();
   const enabledMap = readEnabledMap();
   const records: unknown[] = [];
@@ -1275,13 +1279,15 @@ ipcMain.handle('plugin-list', () => {
 
 // plugin-read-file: read a file from within a plugin's directory.
 // Path traversal protection: lexical check first, then symlink-resolved check.
-ipcMain.handle('plugin-read-file', (_event, pluginId: string, relativePath: string) => {
+ipcMain.handle('plugin-read-file', (event, pluginId: string, relativePath: string) => {
+  assertTrustedSender(event);
   const pluginDir = resolvePluginDir(pluginId);
   return readPluginFileUtf8(pluginDir, relativePath);
 });
 
 // plugin-storage-get: read a key from a plugin's persistent storage.
-ipcMain.handle('plugin-storage-get', (_event, pluginId: string, key: string) => {
+ipcMain.handle('plugin-storage-get', (event, pluginId: string, key: string) => {
+  assertTrustedSender(event);
   const storagePath = path.join(resolvePluginDir(pluginId), 'storage.json');
   try {
     const data = JSON.parse(fs.readFileSync(storagePath, 'utf8')) as Record<string, unknown>;
@@ -1292,7 +1298,8 @@ ipcMain.handle('plugin-storage-get', (_event, pluginId: string, key: string) => 
 });
 
 // plugin-storage-set: write a key to a plugin's persistent storage.
-ipcMain.handle('plugin-storage-set', (_event, pluginId: string, key: string, value: unknown) => {
+ipcMain.handle('plugin-storage-set', (event, pluginId: string, key: string, value: unknown) => {
+  assertTrustedSender(event);
   const pluginDir = resolvePluginDir(pluginId);
   const storagePath = path.join(pluginDir, 'storage.json');
   fs.mkdirSync(pluginDir, { recursive: true, mode: 0o700 });
@@ -1303,7 +1310,8 @@ ipcMain.handle('plugin-storage-set', (_event, pluginId: string, key: string, val
 });
 
 // plugin-storage-delete: remove a key from a plugin's persistent storage.
-ipcMain.handle('plugin-storage-delete', (_event, pluginId: string, key: string) => {
+ipcMain.handle('plugin-storage-delete', (event, pluginId: string, key: string) => {
+  assertTrustedSender(event);
   const storagePath = path.join(resolvePluginDir(pluginId), 'storage.json');
   try {
     const data = JSON.parse(fs.readFileSync(storagePath, 'utf8')) as Record<string, unknown>;
@@ -1313,14 +1321,16 @@ ipcMain.handle('plugin-storage-delete', (_event, pluginId: string, key: string) 
 });
 
 // plugin-set-enabled: enable or disable a plugin by id.
-ipcMain.handle('plugin-set-enabled', (_event, pluginId: string, enabled: boolean) => {
+ipcMain.handle('plugin-set-enabled', (event, pluginId: string, enabled: boolean) => {
+  assertTrustedSender(event);
   const map = readEnabledMap();
   map[pluginId] = enabled;
   writeEnabledMap(map);
 });
 
 // open-plugin-directory: open the plugins folder in the system file manager.
-ipcMain.handle('open-plugin-directory', async () => {
+ipcMain.handle('open-plugin-directory', async (event) => {
+  assertTrustedSender(event);
   const dir = getPluginsDir();
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const err = await shell.openPath(dir);
@@ -1490,12 +1500,16 @@ ipcMain.handle(
   },
 );
 
-ipcMain.handle('clipboard-write-text', (_event, text: string) => {
+ipcMain.handle('clipboard-write-text', (event, text: string) => {
+  assertTrustedSender(event);
   clipboard.writeText(text ?? '');
   return { ok: true };
 });
 
-ipcMain.handle('clipboard-read-text', () => clipboard.readText());
+ipcMain.handle('clipboard-read-text', (event) => {
+  assertTrustedSender(event);
+  return clipboard.readText();
+});
 
 // Open YAML content in the system default editor using a temp file.
 ipcMain.handle(
@@ -1634,6 +1648,11 @@ app.whenReady().then(async () => {
     uploadToServer: false,
     submitURL: '',
     compress: true,
+  });
+  installSecurityGuards({
+    devServerUrl: process.env.VITE_DEV_SERVER_URL,
+    indexHtmlPath: path.join(__dirname, '..', 'renderer', 'index.html'),
+    partitions: [EPHEMERAL_PARTITION],
   });
   wipeTransientUserDataDirs();
   await wipeTransientSessionData();
