@@ -100,6 +100,7 @@ export async function installElectronApiMock(page: Page) {
       localFsSave: async () => undefined,
       localFsRead: async () => '',
       localFsMkdir: async () => undefined,
+      localFsBeginDownload: async () => undefined,
       openFileTransferWindow: async () => ({ ok: true }),
       sessionLogAppend: async () => undefined,
       sessionLogPath: async () => '',

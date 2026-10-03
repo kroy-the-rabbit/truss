@@ -5,6 +5,7 @@ import os from 'os';
 import path from 'path';
 import { startDaemon, stopDaemon, DaemonConfig, enrichPath } from './daemon';
 import { readPluginFileUtf8 } from './pluginFs';
+import { ApprovedRoots, assertInsideApprovedRoot } from './pathSafety';
 
 let mainWindow: BrowserWindow | null = null;
 let daemonConfig: DaemonConfig | null = null;
@@ -1357,12 +1358,30 @@ ipcMain.handle('local-fs-home', (event) => {
   return os.homedir();
 });
 
+// Download destination roots approved by the user (the local folder that was
+// open when they started a download), per webContents. local-fs-save and
+// local-fs-mkdir refuse to write anywhere else.
+const approvedDownloadRoots = new ApprovedRoots();
+
+// Begin a pod -> local download into `destDir` (the folder shown in the local pane).
+ipcMain.handle('local-fs-begin-download', (event, destDir: string) => {
+  assertFileTransferSender(event);
+  const sender = event.sender;
+  const id = sender.id;
+  if (approvedDownloadRoots.get(id) === undefined) {
+    sender.once('destroyed', () => approvedDownloadRoots.clear(id));
+  }
+  approvedDownloadRoots.approve(id, destDir);
+});
+
 // Save a file to local disk (data as Uint8Array/Buffer from renderer).
 ipcMain.handle('local-fs-save', (event, filePath: string, data: Buffer | Uint8Array) => {
   assertFileTransferSender(event);
-  const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(filePath, Buffer.isBuffer(data) ? data : Buffer.from(data));
+  const target = assertInsideApprovedRoot(filePath, approvedDownloadRoots.get(event.sender.id));
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  // Re-check after creating parents in case a symlink was swapped in.
+  assertInsideApprovedRoot(target, approvedDownloadRoots.get(event.sender.id));
+  fs.writeFileSync(target, Buffer.isBuffer(data) ? data : Buffer.from(data));
 });
 
 // Read a local file for upload; returns a Buffer (received as Uint8Array in renderer).
@@ -1374,7 +1393,8 @@ ipcMain.handle('local-fs-read', (event, filePath: string) => {
 // Create a local directory.
 ipcMain.handle('local-fs-mkdir', (event, dirPath: string) => {
   assertFileTransferSender(event);
-  fs.mkdirSync(dirPath, { recursive: true });
+  const target = assertInsideApprovedRoot(dirPath, approvedDownloadRoots.get(event.sender.id));
+  fs.mkdirSync(target, { recursive: true });
 });
 
 // Open a file-transfer window for a given pod, one window per context:namespace:pod.

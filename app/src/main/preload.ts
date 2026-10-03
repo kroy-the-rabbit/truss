@@ -78,6 +78,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localFsSave: (filePath: string, data: ArrayBuffer) => ipcRenderer.invoke('local-fs-save', filePath, data),
   localFsRead: (filePath: string) => ipcRenderer.invoke('local-fs-read', filePath),
   localFsMkdir: (dirPath: string) => ipcRenderer.invoke('local-fs-mkdir', dirPath),
+  localFsBeginDownload: (destDir: string) => ipcRenderer.invoke('local-fs-begin-download', destDir),
   openFileTransferWindow: (opts: { context: string; namespace: string; pod: string; container: string }) =>
     ipcRenderer.invoke('open-filetransfer-window', opts),
   sessionLogAppend: (

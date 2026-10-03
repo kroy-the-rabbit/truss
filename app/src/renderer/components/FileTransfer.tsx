@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { usePodInfo } from '../state/queries';
+import { isSafeRemoteName } from '../lib/safeRemoteName';
 
 interface FileEntry {
   name: string;
@@ -339,7 +340,15 @@ export function FileTransfer({ context, namespace, pod, initialContainer }: File
     const selectedEntry = containerEntries.find((e) => e.name === containerSelected);
     if (!selectedEntry) return;
 
+    // Names come from inside the container and are untrusted: refuse anything
+    // that could escape the local destination folder (e.g. `..\..\x` on Windows).
+    if (!isSafeRemoteName(selectedEntry.name)) {
+      setTransferError(`Download blocked: "${selectedEntry.name}" is not a safe local file name`);
+      return;
+    }
+
     const srcPath = joinContainerPath(containerPath, containerSelected);
+    const skipped: string[] = [];
 
     setTransferError('');
     const ctrl = new AbortController();
@@ -347,6 +356,8 @@ export function FileTransfer({ context, namespace, pod, initialContainer }: File
     setTransfer({ direction: 'download', name: containerSelected, loaded: 0, total: 0, filesDone: 0, filesTotal: 0 });
 
     try {
+      // Tell main which local folder this download may write into.
+      await api.localFsBeginDownload(localPath);
       if (!selectedEntry.isDir) {
         const destPath = joinLocalPath(localPath, containerSelected);
         await downloadFileToLocal(srcPath, destPath, ctrl.signal, (n) => {
@@ -365,6 +376,10 @@ export function FileTransfer({ context, namespace, pod, initialContainer }: File
           for (const e of entries) {
             if (e.name === '.' || e.name === '..') continue;
             const childSrc = joinContainerPath(current.srcDir, e.name);
+            if (!isSafeRemoteName(e.name)) {
+              skipped.push(childSrc);
+              continue;
+            }
             const childDest = joinLocalPath(current.destDir, e.name);
             if (e.isDir) {
               await api.localFsMkdir(childDest);
@@ -386,9 +401,17 @@ export function FileTransfer({ context, namespace, pod, initialContainer }: File
       }
       await listLocal(localPath);
       setTransfer(null);
+      if (skipped.length > 0) {
+        const sample = skipped.slice(0, 3).map((p) => JSON.stringify(p)).join(', ');
+        const more = skipped.length > 3 ? `, and ${skipped.length - 3} more` : '';
+        setTransferError(
+          `Download finished, but skipped ${skipped.length} item${skipped.length === 1 ? '' : 's'} with unsafe names: ${sample}${more}`,
+        );
+      }
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
-        setTransferError(`Download failed: ${err}`);
+        const skippedNote = skipped.length > 0 ? ` (${skipped.length} unsafe name${skipped.length === 1 ? '' : 's'} skipped)` : '';
+        setTransferError(`Download failed: ${err}${skippedNote}`);
       }
       setTransfer(null);
     }
