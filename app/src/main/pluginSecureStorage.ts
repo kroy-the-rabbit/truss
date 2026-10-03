@@ -1,19 +1,19 @@
 // Main-process client for trussd's plugin secure-storage endpoints.
 //
 // Renderers never call these endpoints: trussd requires the plugin storage
-// secret (X-Truss-Plugin-Storage-Token), which only main holds. Main resolves
+// main-process token (X-Truss-Main-Token), which only main holds. Main resolves
 // the calling plugin from its capability token and injects plugin_id here.
 
 import http from 'http';
 
-export const PLUGIN_STORAGE_TOKEN_HEADER = 'X-Truss-Plugin-Storage-Token';
+export const MAIN_TOKEN_HEADER = 'X-Truss-Main-Token';
 
 export type SecureStorageOp = 'get' | 'set' | 'delete';
 
 export interface SecureStorageTarget {
   port: number;
   token: string; // daemon bearer token
-  storageToken: string; // plugin storage secret
+  mainToken: string; // main-process-only daemon token
 }
 
 export function pluginSecureStorageRequest(
@@ -34,7 +34,7 @@ export function pluginSecureStorageRequest(
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(payload),
           Authorization: `Bearer ${target.token}`,
-          [PLUGIN_STORAGE_TOKEN_HEADER]: target.storageToken,
+          [MAIN_TOKEN_HEADER]: target.mainToken,
         },
       },
       (res) => {

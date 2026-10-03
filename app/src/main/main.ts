@@ -9,7 +9,6 @@ import {
   getDaemonConfig,
   getDaemonMainAccess,
   getDaemonState,
-  getPluginStorageToken,
   startDaemonSupervisor,
   stopDaemon,
 } from './daemon';
@@ -1510,12 +1509,12 @@ ipcMain.handle('plugin-storage-delete', (event, capability: unknown, key: string
 ipcMain.handle('plugin-secure-storage', async (event, capability: unknown, op: string, key: string, value?: unknown) => {
   const pluginId = requirePluginCapability(event, capability);
   if (op !== 'get' && op !== 'set' && op !== 'delete') throw new Error('Invalid secure storage operation');
-  const cfg = getDaemonConfig();
-  if (!cfg) throw new Error('Daemon is not running');
+  const access = getDaemonMainAccess();
+  if (!access) throw new Error('Daemon is not running');
   const body: { plugin_id: string; key: string; value?: unknown } = { plugin_id: pluginId, key };
   if (op === 'set') body.value = value;
   const res = await pluginSecureStorageRequest(
-    { port: cfg.port, token: cfg.token, storageToken: getPluginStorageToken() },
+    { port: access.port, token: access.token, mainToken: access.mainToken },
     op,
     body,
   );

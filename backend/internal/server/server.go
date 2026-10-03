@@ -63,9 +63,6 @@ type Server struct {
 	// writeEnabled is false (read-only) by default so the zero value fails
 	// closed; see ReadOnly/SetReadOnly in readonly.go.
 	writeEnabled atomic.Bool
-	// pluginStorageToken gates the plugin secure-storage endpoints; see
-	// plugin_storage_auth.go.
-	pluginStorageToken string
 	// mainToken gates main-process-only endpoints; see mainonly.go.
 	mainToken atomic.Pointer[string]
 }
