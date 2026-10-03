@@ -1081,6 +1081,29 @@ function SetupRouter() {
     void checkStatus();
   }, [daemonStatus, daemonEpoch, setupState, checkStatus]);
 
+  // A restarted daemon starts with the store locked (the password lives only in
+  // daemon memory), so re-check setup status on every new epoch. If it is locked
+  // the password prompt is shown again and popouts are told the store is locked.
+  const readyEpochRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (daemonStatus !== 'ready') return;
+    const previous = readyEpochRef.current;
+    readyEpochRef.current = daemonEpoch;
+    if (previous === null || previous === daemonEpoch) return;
+    statusBackoffRef.current.reset();
+    void checkStatus();
+  }, [daemonStatus, daemonEpoch, checkStatus]);
+
+  const prevSetupStateRef = useRef<SetupState>(setupState);
+  useEffect(() => {
+    const previous = prevSetupStateRef.current;
+    prevSetupStateRef.current = setupState;
+    if (previous === 'ready' && setupState === 'locked') {
+      const api = (window as any).electronAPI;
+      if (api?.sessionBroadcast) void api.sessionBroadcast('locked');
+    }
+  }, [setupState]);
+
   useEffect(() => {
     if (setupState !== 'ready') return;
     let mounted = true;
