@@ -9,6 +9,7 @@ import { PortForwardManager } from './components/PortForwardManager';
 import { useSessionEvent } from './hooks/useSessionEvent';
 import { createAppQueryClient } from './state/queryClient';
 import { ContextAuthBanner } from './components/ContextAuthBanner';
+import { useConnectionSync } from './state/connectionStore';
 import './styles.css';
 
 const YamlDiffWindow = lazy(async () => {
@@ -336,6 +337,9 @@ function SessionContent() {
 }
 
 export function SessionWindow() {
+  // Daemon restarts / system resume: rebuild transport and refetch. Popouts
+  // read RO from the daemon, so they skip the main window's reconcile.
+  useConnectionSync(queryClient);
   return (
     <QueryClientProvider client={queryClient}>
       <SessionContent />

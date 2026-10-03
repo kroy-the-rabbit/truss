@@ -1,10 +1,15 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useReducer } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { usePodInfo } from '../state/queries';
 import { useSessionEvent } from '../hooks/useSessionEvent';
 import { useDaemonReadOnly } from '../state/readOnlySync';
+import {
+  EXEC_RECONNECT_MAX_ATTEMPTS,
+  execReconnectReducer,
+  initialExecReconnectState,
+} from './execReconnect';
 
 export interface ExecTabSaveState {
   autoSave: boolean;
@@ -37,6 +42,9 @@ export function ExecTab({ name, namespace, context, initialContainer, tabId, onS
   const decoderRef = useRef(new TextDecoder());
   const captureRef = useRef('');
   const autoConnectedRef = useRef(false);
+  // Auto-reconnect after an unexpected disconnect (see execReconnect.ts).
+  const [reconnect, dispatchReconnect] = useReducer(execReconnectReducer, initialExecReconnectState);
+  const [reconnectCountdown, setReconnectCountdown] = useState(0);
   // Snapshot of terminal selection taken when the context menu opens (before focus shifts away).
   const contextMenuSelectionRef = useRef('');
   const [menuOpen, setMenuOpen] = useState(false);
@@ -209,7 +217,9 @@ export function ExecTab({ name, namespace, context, initialContainer, tabId, onS
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const config = await (window as any).electronAPI.getDaemonConfig();
       if (!config) {
+        // Daemon starting/restarting: retry with backoff like any other drop.
         setError('Daemon not connected');
+        dispatchReconnect({ type: 'unexpected-close', code: 0, openForMs: 0 });
         return;
       }
 
@@ -228,8 +238,12 @@ export function ExecTab({ name, namespace, context, initialContainer, tabId, onS
       manualCloseRef.current = false;
       ws.binaryType = 'arraybuffer';
 
+      let openedAt = 0;
       ws.onopen = () => {
+        openedAt = Date.now();
         setConnected(true);
+        setError('');
+        dispatchReconnect({ type: 'opened' });
         terminal.focus();
         fitAddon.fit(); // Re-fit now that the connection is live and layout is settled
         ws.send(JSON.stringify({ type: 'resize', cols: terminal.cols, rows: terminal.rows }));
@@ -265,18 +279,28 @@ export function ExecTab({ name, namespace, context, initialContainer, tabId, onS
       };
 
       ws.onclose = (event) => {
+        // A socket that was already replaced or torn down (container switch,
+        // RO, lock) has been handled by whoever detached it.
+        if (wsRef.current !== ws) return;
         setConnected(false);
         if (manualCloseRef.current) {
           terminal.write('\r\n[Session closed]\r\n');
           manualCloseRef.current = false;
+          dispatchReconnect({ type: 'reset' });
           return;
         }
         const detail = event.reason ? `${event.code}: ${event.reason}` : `${event.code}`;
         setError(`WebSocket disconnected (${detail})`);
         terminal.write(`\r\n[WebSocket disconnected: ${detail}]\r\n`);
+        dispatchReconnect({
+          type: 'unexpected-close',
+          code: event.code,
+          openForMs: openedAt ? Date.now() - openedAt : 0,
+        });
       };
 
       ws.onerror = () => {
+        if (wsRef.current !== ws) return;
         setError('WebSocket connection failed');
         setConnected(false);
       };
@@ -354,7 +378,9 @@ export function ExecTab({ name, namespace, context, initialContainer, tabId, onS
 
   // Switching to read-only ends any live exec session.
   useEffect(() => {
-    if (!readOnly || !wsRef.current) return;
+    if (!readOnly) return;
+    dispatchReconnect({ type: 'reset' });
+    if (!wsRef.current) return;
     manualCloseRef.current = true;
     wsRef.current.close();
     wsRef.current = null;
@@ -401,6 +427,16 @@ export function ExecTab({ name, namespace, context, initialContainer, tabId, onS
   useSessionEvent((type) => {
     if (type === 'locked') {
       setSessionLocked(true);
+      // Like port-forwards and logs, a live shell must not outlive the vault lock.
+      dispatchReconnect({ type: 'reset' });
+      const ws = wsRef.current;
+      if (ws) {
+        manualCloseRef.current = true;
+        wsRef.current = null;
+        ws.close();
+        setConnected(false);
+        terminalRef.current?.write('\r\n[Disconnected: store locked]\r\n');
+      }
     } else if (type === 'unlocked' || type === 'profile-changed') {
       setSessionLocked(false);
     }
@@ -426,6 +462,43 @@ export function ExecTab({ name, namespace, context, initialContainer, tabId, onS
       autoConnectedRef.current = false;
     }
   }, [canExec, connected, connect]);
+
+  // Run a scheduled auto-reconnect, with a visible countdown. RO, a locked
+  // store or a stopped container cancel it (auto-connect takes over later).
+  useEffect(() => {
+    if (reconnect.status !== 'scheduled') return;
+    if (!canExec || sessionLocked) {
+      dispatchReconnect({ type: 'reset' });
+      return;
+    }
+    const deadline = Date.now() + reconnect.delayMs;
+    setReconnectCountdown(Math.max(1, Math.ceil(reconnect.delayMs / 1000)));
+    const tick = window.setInterval(() => {
+      setReconnectCountdown(Math.max(1, Math.ceil((deadline - Date.now()) / 1000)));
+    }, 1000);
+    const timer = window.setTimeout(() => {
+      dispatchReconnect({ type: 'attempt' });
+      void connect();
+    }, reconnect.delayMs);
+    return () => {
+      window.clearTimeout(timer);
+      window.clearInterval(tick);
+    };
+  }, [reconnect, canExec, sessionLocked, connect]);
+
+  const manualConnect = useCallback(() => {
+    dispatchReconnect({ type: 'reset' });
+    void connect();
+  }, [connect]);
+
+  const reconnectStatusText =
+    reconnect.status === 'scheduled'
+      ? `Disconnected — reconnecting in ${reconnectCountdown}s`
+      : reconnect.status === 'connecting'
+        ? `Reconnecting… (attempt ${reconnect.attempts} of ${EXEC_RECONNECT_MAX_ATTEMPTS})`
+        : reconnect.status === 'exhausted'
+          ? `${error || 'Disconnected'} — gave up after ${EXEC_RECONNECT_MAX_ATTEMPTS} attempts`
+          : '';
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -473,8 +546,14 @@ export function ExecTab({ name, namespace, context, initialContainer, tabId, onS
         {podPhase && (
           <span className={`pod-phase-pill ${podPhase.toLowerCase()}`}>Pod: {podPhase}</span>
         )}
-        <button className="exec-connect-btn" onClick={connect} disabled={!canExec || connected}>
-          {connected ? 'Connected' : readOnly ? 'Read-only' : canExec ? 'Connect' : 'Not Running'}
+        <button className="exec-connect-btn" onClick={manualConnect} disabled={!canExec || connected}>
+          {connected
+            ? 'Connected'
+            : readOnly
+              ? 'Read-only'
+              : canExec
+                ? (error || reconnect.status !== 'idle' ? 'Reconnect' : 'Connect')
+                : 'Not Running'}
         </button>
         {connected && (
           <button
@@ -542,8 +621,16 @@ export function ExecTab({ name, namespace, context, initialContainer, tabId, onS
           Save...
         </button>
         {autoSave && savePath && <span className="logs-fetching" title={savePath}>Saving: {savePath.split('/').slice(-2).join('/')}</span>}
-        <span className={`exec-status ${connected ? 'connected' : ''}`}>
-          {connected ? 'Connected' : readOnly ? 'Read-only mode' : error || (containerRunning ? 'Disconnected' : 'Container not running')}
+        <span
+          className={`exec-status ${connected ? 'connected' : ''} ${!connected && reconnectStatusText && reconnect.status !== 'exhausted' ? 'exec-reconnect-status' : ''}`}
+          role="status"
+          aria-live="polite"
+        >
+          {connected
+            ? 'Connected'
+            : readOnly
+              ? 'Read-only mode'
+              : reconnectStatusText || error || (containerRunning ? 'Disconnected' : 'Container not running')}
         </span>
       </div>
       {runningContainers.length > 1 && (

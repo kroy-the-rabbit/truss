@@ -6,6 +6,7 @@ import { useLiveResourceInvalidation } from '../../src/renderer/hooks/useLiveRes
 import { useAppStore } from '../../src/renderer/state/store';
 import { resetAppStore } from './storeTestUtils';
 import { useContextHealthStore } from '../../src/renderer/state/contextHealth';
+import { useConnectionStore } from '../../src/renderer/state/connectionStore';
 
 class MockWebSocket {
   static CONNECTING = 0;
@@ -45,6 +46,8 @@ describe('useLiveResourceInvalidation idle refresh', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-01T00:00:00.000Z'));
     resetAppStore();
+    useConnectionStore.getState().reset();
+    useContextHealthStore.getState().clear();
     MockWebSocket.instances = [];
     originalWebSocket = globalThis.WebSocket;
     globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
@@ -65,41 +68,161 @@ describe('useLiveResourceInvalidation idle refresh', () => {
     vi.useRealTimers();
   });
 
-  test('foreground after a quiet period invalidates active context resources and helm views', async () => {
-    useAppStore.getState().setActiveContext('ctx-a');
-    useAppStore.getState().setActiveNamespace('default');
+  async function flush() {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  }
 
+  function seedQueries() {
     const resourcesKey = ['resources', 'ctx-a', 'default', '', 'v1', 'pods', ''];
     const helmKey = ['helmRelease', 'ctx-a', 'default', 'api'];
     const otherContextKey = ['resources', 'ctx-b', 'default', '', 'v1', 'pods', ''];
     queryClient.setQueryData(resourcesKey, { items: [] });
     queryClient.setQueryData(helmKey, { name: 'api' });
     queryClient.setQueryData(otherContextKey, { items: [] });
+    return { resourcesKey, helmKey, otherContextKey };
+  }
 
-    render(
+  function renderHarness() {
+    return render(
       <QueryClientProvider client={queryClient}>
         <Harness />
       </QueryClientProvider>,
     );
+  }
 
-    await act(async () => {
-      await Promise.resolve();
-    });
+  function open(socket: MockWebSocket) {
+    socket.readyState = MockWebSocket.OPEN;
+    socket.onopen?.(new Event('open'));
+  }
+
+  test('the first open does not invalidate; a reconnect after a drop does', async () => {
+    useAppStore.getState().setActiveContext('ctx-a');
+    useAppStore.getState().setActiveNamespace('default');
+    const { resourcesKey, helmKey, otherContextKey } = seedQueries();
+    renderHarness();
+    await act(flush);
     expect(MockWebSocket.instances).toHaveLength(1);
-    const socket = MockWebSocket.instances[0];
 
     await act(async () => {
-      socket.readyState = MockWebSocket.OPEN;
-      socket.onopen?.(new Event('open'));
-      vi.advanceTimersByTime(31_000);
-      window.dispatchEvent(new Event('focus'));
-      await Promise.resolve();
+      open(MockWebSocket.instances[0]);
+      await flush();
     });
+    expect(queryClient.getQueryState(resourcesKey)?.isInvalidated).toBe(false);
 
+    // Server drops the socket after it was open: reconnect with backoff.
+    await act(async () => {
+      MockWebSocket.instances[0].close();
+      vi.advanceTimersByTime(1_000);
+      await flush();
+    });
+    expect(MockWebSocket.instances).toHaveLength(2);
+    expect(queryClient.getQueryState(resourcesKey)?.isInvalidated).toBe(false);
+
+    await act(async () => {
+      open(MockWebSocket.instances[1]);
+      await flush();
+    });
     expect(queryClient.getQueryState(resourcesKey)?.isInvalidated).toBe(true);
     expect(queryClient.getQueryState(helmKey)?.isInvalidated).toBe(true);
     expect(queryClient.getQueryState(otherContextKey)?.isInvalidated).toBe(false);
-    expect(socket.close).toHaveBeenCalledTimes(1);
+  });
+
+  test('a resync message invalidates every resource query of the active context', async () => {
+    useAppStore.getState().setActiveContext('ctx-a');
+    const { resourcesKey, helmKey, otherContextKey } = seedQueries();
+    renderHarness();
+    await act(flush);
+    const socket = MockWebSocket.instances[0];
+    await act(async () => {
+      open(socket);
+      socket.onmessage?.(new MessageEvent('message', {
+        data: JSON.stringify({ type: 'resync', reason: 'subscriber buffer overflow' }),
+      }));
+      await flush();
+    });
+    expect(queryClient.getQueryState(resourcesKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(helmKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(otherContextKey)?.isInvalidated).toBe(false);
+    expect(socket.close).not.toHaveBeenCalled();
+  });
+
+  test('keeps retrying while the daemon config is missing, and connects at once on daemon ready', async () => {
+    const getDaemonConfig = vi.fn().mockResolvedValue(null);
+    (window as any).electronAPI = { getDaemonConfig };
+    useAppStore.getState().setActiveContext('ctx-a');
+    renderHarness();
+    await act(flush);
+    expect(getDaemonConfig).toHaveBeenCalledTimes(1);
+    expect(MockWebSocket.instances).toHaveLength(0);
+
+    // Backoff retries (each window is at most 30s) instead of giving up.
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+        await flush();
+      });
+    }
+    expect(getDaemonConfig.mock.calls.length).toBeGreaterThanOrEqual(5);
+    expect(MockWebSocket.instances).toHaveLength(0);
+
+    // The daemon comes up: a ready event reconnects without waiting for backoff.
+    getDaemonConfig.mockResolvedValue({ port: 23456, token: 'new-token' });
+    await act(async () => {
+      useConnectionStore.getState().setDaemon({ status: 'restarting', epoch: 1 });
+      useConnectionStore.getState().setDaemon({ status: 'ready', epoch: 2 });
+      await flush();
+    });
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(MockWebSocket.instances[0].url).toContain(':23456/');
+    expect(MockWebSocket.instances[0].protocols).toContain('truss-token-new-token');
+  });
+
+  test('system resume replaces the open socket immediately and refetches on open', async () => {
+    useAppStore.getState().setActiveContext('ctx-a');
+    useAppStore.getState().setActiveNamespace('default');
+    const { resourcesKey } = seedQueries();
+    renderHarness();
+    await act(flush);
+    const first = MockWebSocket.instances[0];
+    await act(async () => {
+      open(first);
+      await flush();
+    });
+
+    await act(async () => {
+      useConnectionStore.getState().markResume(Date.now());
+      await flush();
+    });
+    expect(first.close).toHaveBeenCalled();
+    expect(MockWebSocket.instances).toHaveLength(2);
+
+    await act(async () => {
+      open(MockWebSocket.instances[1]);
+      await flush();
+    });
+    expect(queryClient.getQueryState(resourcesKey)?.isInvalidated).toBe(true);
+
+    // The replaced socket's close did not schedule an extra reconnect.
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+      await flush();
+    });
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+  test('window focus no longer forces a reconnect', async () => {
+    useAppStore.getState().setActiveContext('ctx-a');
+    renderHarness();
+    await act(flush);
+    const socket = MockWebSocket.instances[0];
+    await act(async () => {
+      open(socket);
+      vi.advanceTimersByTime(31_000);
+      window.dispatchEvent(new Event('focus'));
+      await flush();
+    });
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(MockWebSocket.instances).toHaveLength(1);
   });
 
   test('does not open the watch socket while the context needs sign-in, reconnects once healthy', async () => {

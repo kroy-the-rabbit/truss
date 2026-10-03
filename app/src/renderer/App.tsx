@@ -15,7 +15,9 @@ import { fetchSetupAPI, getResourcesClient } from './api/client';
 import { PluginProvider } from './plugins';
 import { pluginRegistry } from './plugins';
 import { useLiveResourceInvalidation } from './hooks/useLiveResourceInvalidation';
-import { useReadOnlySync } from './state/readOnlySync';
+import { reconcileReadOnly, useReadOnlySync } from './state/readOnlySync';
+import { useConnectionStore, useConnectionSync } from './state/connectionStore';
+import { createBackoff } from './lib/backoff';
 import { ToastContainer } from './components/ToastContainer';
 import { createAppQueryClient } from './state/queryClient';
 import { ContextAuthBanner } from './components/ContextAuthBanner';
@@ -1023,10 +1025,20 @@ function SetupRouter() {
   const [neverConfirmBypass, setNeverConfirmBypass] = useState(false);
   const { setAutoLockMinutes, setNeverConfirmStartupBypass } = useAppStore();
 
+  const statusBackoffRef = useRef(createBackoff({ baseMs: 250, capMs: 5000 }));
+  const statusRetryTimerRef = useRef<number | null>(null);
+  const statusMountedRef = useRef(true);
+
   const checkStatus = useCallback(async () => {
+    if (statusRetryTimerRef.current !== null) {
+      window.clearTimeout(statusRetryTimerRef.current);
+      statusRetryTimerRef.current = null;
+    }
     try {
       const resp = await fetchSetupAPI('/api/setup-status');
       const data = await resp.json();
+      if (!statusMountedRef.current) return;
+      statusBackoffRef.current.reset();
       if (data.broken) {
         setBrokenError(data.broken_error || 'Unknown error');
         setSetupState('broken');
@@ -1038,14 +1050,36 @@ function SetupRouter() {
         setSetupState('ready');
       }
     } catch {
-      // Daemon not reachable yet — retry shortly.
-      setTimeout(checkStatus, 800);
+      // Daemon not reachable yet — retry with jittered backoff (capped at 5s);
+      // a daemon "ready" event below retries immediately.
+      if (!statusMountedRef.current) return;
+      statusRetryTimerRef.current = window.setTimeout(() => {
+        statusRetryTimerRef.current = null;
+        void checkStatus();
+      }, statusBackoffRef.current.next());
     }
   }, []);
 
   useEffect(() => {
-    checkStatus();
+    statusMountedRef.current = true;
+    void checkStatus();
+    return () => {
+      statusMountedRef.current = false;
+      if (statusRetryTimerRef.current !== null) {
+        window.clearTimeout(statusRetryTimerRef.current);
+        statusRetryTimerRef.current = null;
+      }
+    };
   }, [checkStatus]);
+
+  // While still waiting for the daemon, retry as soon as it reports ready.
+  const daemonStatus = useConnectionStore((s) => s.daemon.status);
+  const daemonEpoch = useConnectionStore((s) => s.daemon.epoch);
+  useEffect(() => {
+    if (setupState !== 'checking' || daemonStatus !== 'ready') return;
+    statusBackoffRef.current.reset();
+    void checkStatus();
+  }, [daemonStatus, daemonEpoch, setupState, checkStatus]);
 
   useEffect(() => {
     if (setupState !== 'ready') return;
@@ -1214,6 +1248,9 @@ function StoreErrorScreen({ error, onReset }: { error: string; onReset: () => vo
 }
 
 export default function App() {
+  // Daemon restarts / system resume: rebuild transport, reconnect, refetch,
+  // and re-run the read-only reconcile (main window owns the RO toggle).
+  useConnectionSync(queryClient, { onDaemonRestart: () => { void reconcileReadOnly(); } });
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>

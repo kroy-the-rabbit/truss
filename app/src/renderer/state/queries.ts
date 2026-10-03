@@ -102,9 +102,10 @@ export function usePing() {
       const client = await getHealthClient();
       return client.ping({});
     },
-    retry: true,
-    retryDelay: 1000,
-    refetchInterval: 30000,
+    // No silent retries: a failed ping must surface (TopBar turns red), and the
+    // short error-state interval brings it back as soon as the daemon answers.
+    retry: false,
+    refetchInterval: (query) => (query.state.status === 'error' ? 3000 : 15000),
   });
 }
 
