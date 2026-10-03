@@ -76,13 +76,13 @@ func (m *Manager) EnsureStarted(contextName string, dynClient dynamic.Interface,
 		if _, exists := cc.gvrs[gvr]; !exists {
 			inf := cc.factory.ForResource(gvr)
 			inf.Informer().AddEventHandler(kcache.ResourceEventHandlerFuncs{
-				AddFunc: func(obj interface{}) {
+				AddFunc: func(obj any) {
 					m.broadcast(contextName, gvr, "add", obj)
 				},
-				UpdateFunc: func(_, newObj interface{}) {
+				UpdateFunc: func(_, newObj any) {
 					m.broadcast(contextName, gvr, "update", newObj)
 				},
-				DeleteFunc: func(obj interface{}) {
+				DeleteFunc: func(obj any) {
 					m.broadcast(contextName, gvr, "delete", obj)
 				},
 			})
@@ -96,7 +96,7 @@ func (m *Manager) EnsureStarted(contextName string, dynClient dynamic.Interface,
 	cc.factory.Start(cc.stopCh)
 }
 
-func (m *Manager) broadcast(contextName string, gvr schema.GroupVersionResource, verb string, obj interface{}) {
+func (m *Manager) broadcast(contextName string, gvr schema.GroupVersionResource, verb string, obj any) {
 	u, ok := toUnstructured(obj)
 	if !ok || u == nil {
 		return
@@ -130,7 +130,7 @@ func (m *Manager) broadcast(contextName string, gvr schema.GroupVersionResource,
 	}
 }
 
-func toUnstructured(obj interface{}) (*unstructured.Unstructured, bool) {
+func toUnstructured(obj any) (*unstructured.Unstructured, bool) {
 	switch t := obj.(type) {
 	case *unstructured.Unstructured:
 		return t, true

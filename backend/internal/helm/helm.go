@@ -226,12 +226,12 @@ func Upgrade(cfg *rest.Config, namespace, name, valuesYAML string) error {
 	upgrade := action.NewUpgrade(ac)
 	upgrade.Namespace = namespace
 
-	var vals map[string]interface{}
+	var vals map[string]any
 	if err := yaml.Unmarshal([]byte(valuesYAML), &vals); err != nil {
 		return fmt.Errorf("parsing values: %w", err)
 	}
 	if vals == nil {
-		vals = map[string]interface{}{}
+		vals = map[string]any{}
 	}
 
 	_, err = upgrade.Run(name, rel.Chart, vals)

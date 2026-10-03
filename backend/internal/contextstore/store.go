@@ -1006,7 +1006,7 @@ func ListGPGKeys() ([]GPGKeyInfo, error) {
 
 	var keys []GPGKeyInfo
 	var current *GPGKeyInfo
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		parts := strings.Split(line, ":")
 		if len(parts) < 2 {
 			continue

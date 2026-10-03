@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/coder/websocket"
 	"github.com/kroy/truss/backend/internal/auth"
 	"github.com/kroy/truss/backend/internal/contextstore"
 	disc "github.com/kroy/truss/backend/internal/discovery"
@@ -41,7 +42,6 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
-	"nhooyr.io/websocket"
 	"sigs.k8s.io/yaml"
 
 	pb "github.com/kroy/truss/backend/api/gen/go/truss/v1"
@@ -593,7 +593,7 @@ func (s *Server) ScaleResource(
 	}
 	prevReplicas, _, _ := unstructured.NestedInt64(current.Object, "spec", "replicas")
 
-	patch := []byte(fmt.Sprintf(`{"spec":{"replicas":%d}}`, replicas))
+	patch := fmt.Appendf(nil, `{"spec":{"replicas":%d}}`, replicas)
 	_, err = cs.Dynamic.Resource(gvr).Namespace(ns).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("scaling resource: %w", err))
@@ -626,10 +626,10 @@ func (s *Server) RestartResource(
 	ns := req.Msg.Namespace
 	name := req.Msg.Name
 
-	patch := []byte(fmt.Sprintf(
+	patch := fmt.Appendf(nil,
 		`{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"%s"}}}}}`,
 		time.Now().Format(time.RFC3339),
-	))
+	)
 	_, err = cs.Dynamic.Resource(gvr).Namespace(ns).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("restarting resource: %w", err))
@@ -895,12 +895,12 @@ func (s *Server) ApplyYaml(
 	if ns == "" {
 		result, err = cs.Dynamic.Resource(gvr).Patch(
 			ctx, obj.GetName(), types.ApplyPatchType, data,
-			metav1.PatchOptions{FieldManager: fieldManager, Force: boolPtr(true)},
+			metav1.PatchOptions{FieldManager: fieldManager, Force: new(true)},
 		)
 	} else {
 		result, err = cs.Dynamic.Resource(gvr).Namespace(ns).Patch(
 			ctx, obj.GetName(), types.ApplyPatchType, data,
-			metav1.PatchOptions{FieldManager: fieldManager, Force: boolPtr(true)},
+			metav1.PatchOptions{FieldManager: fieldManager, Force: new(true)},
 		)
 	}
 	if err != nil {
@@ -979,10 +979,7 @@ func computeDiff(current, proposed string) string {
 	var diff strings.Builder
 	diff.WriteString("--- current\n")
 	diff.WriteString("+++ proposed\n")
-	maxLen := len(currentLines)
-	if len(proposedLines) > maxLen {
-		maxLen = len(proposedLines)
-	}
+	maxLen := max(len(proposedLines), len(currentLines))
 	for i := 0; i < maxLen; i++ {
 		var cl, pl string
 		if i < len(currentLines) {
@@ -1075,7 +1072,8 @@ func convertToProto(obj *unstructured.Unstructured, kind string, summaryFields [
 	}
 }
 
-func boolPtr(b bool) *bool { return &b }
+//go:fix inline
+func boolPtr(b bool) *bool { return new(b) }
 
 func buildContainerInfo(name, image string, isInit bool, status corev1.ContainerStatus) *pb.ContainerInfo {
 	info := &pb.ContainerInfo{
@@ -1860,17 +1858,17 @@ func (s *Server) TriggerCronJob(
 	}
 
 	job := &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		Object: map[string]any{
 			"apiVersion": "batch/v1",
 			"kind":       "Job",
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name":      jobName,
 				"namespace": req.Msg.Namespace,
-				"annotations": map[string]interface{}{
+				"annotations": map[string]any{
 					"cronjob.kubernetes.io/instantiate": "manual",
 				},
-				"ownerReferences": []interface{}{
-					map[string]interface{}{
+				"ownerReferences": []any{
+					map[string]any{
 						"apiVersion":         "batch/v1",
 						"kind":               "CronJob",
 						"name":               req.Msg.Name,

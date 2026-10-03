@@ -8,7 +8,7 @@ import (
 )
 
 // u builds a minimal Unstructured from a plain map.
-func u(obj map[string]interface{}) *unstructured.Unstructured {
+func u(obj map[string]any) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: obj}
 }
 
@@ -36,16 +36,16 @@ func mustField(t *testing.T, fields []SummaryField, key string) string {
 // ---------------------------------------------------------------------------
 
 func TestSummarizePodBasic(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"status": map[string]interface{}{
+	obj := u(map[string]any{
+		"status": map[string]any{
 			"phase": "Running",
 			"podIP": "10.0.0.5",
-			"containerStatuses": []interface{}{
-				map[string]interface{}{"ready": true, "restartCount": int64(0)},
-				map[string]interface{}{"ready": true, "restartCount": int64(2)},
+			"containerStatuses": []any{
+				map[string]any{"ready": true, "restartCount": int64(0)},
+				map[string]any{"ready": true, "restartCount": int64(2)},
 			},
 		},
-		"spec": map[string]interface{}{
+		"spec": map[string]any{
 			"nodeName": "node-1",
 		},
 	})
@@ -68,12 +68,12 @@ func TestSummarizePodBasic(t *testing.T) {
 }
 
 func TestSummarizePodPartialReady(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"status": map[string]interface{}{
+	obj := u(map[string]any{
+		"status": map[string]any{
 			"phase": "Pending",
-			"containerStatuses": []interface{}{
-				map[string]interface{}{"ready": false, "restartCount": int64(0)},
-				map[string]interface{}{"ready": true, "restartCount": int64(1)},
+			"containerStatuses": []any{
+				map[string]any{"ready": false, "restartCount": int64(0)},
+				map[string]any{"ready": true, "restartCount": int64(1)},
 			},
 		},
 	})
@@ -85,7 +85,7 @@ func TestSummarizePodPartialReady(t *testing.T) {
 
 func TestSummarizePodEmpty(t *testing.T) {
 	// No status fields — should not panic.
-	fields := Summarize("Pod", u(map[string]interface{}{}))
+	fields := Summarize("Pod", u(map[string]any{}))
 	if got := mustField(t, fields, "Status"); got != "" {
 		t.Errorf("expected empty Status, got %q", got)
 	}
@@ -95,8 +95,8 @@ func TestSummarizePodEmpty(t *testing.T) {
 }
 
 func TestPodStartedAtUsesStartTime(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"status": map[string]interface{}{
+	obj := u(map[string]any{
+		"status": map[string]any{
 			"startTime": "2026-01-15T10:00:00Z",
 		},
 	})
@@ -107,7 +107,7 @@ func TestPodStartedAtUsesStartTime(t *testing.T) {
 }
 
 func TestPodStartedAtFallsBackToCreationTimestamp(t *testing.T) {
-	obj := &unstructured.Unstructured{Object: map[string]interface{}{}}
+	obj := &unstructured.Unstructured{Object: map[string]any{}}
 	obj.SetCreationTimestamp(metav1.Date(2026, 1, 20, 8, 30, 0, 0, metav1.Now().Location()))
 	fields := Summarize("Pod", obj)
 	got := mustField(t, fields, "StartedAt")
@@ -117,13 +117,13 @@ func TestPodStartedAtFallsBackToCreationTimestamp(t *testing.T) {
 }
 
 func TestPodStartedAtUsesNewestRunningOnRestart(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"status": map[string]interface{}{
-			"containerStatuses": []interface{}{
-				map[string]interface{}{
+	obj := u(map[string]any{
+		"status": map[string]any{
+			"containerStatuses": []any{
+				map[string]any{
 					"restartCount": int64(1),
-					"state": map[string]interface{}{
-						"running": map[string]interface{}{
+					"state": map[string]any{
+						"running": map[string]any{
 							"startedAt": "2026-02-10T12:00:00Z",
 						},
 					},
@@ -142,9 +142,9 @@ func TestPodStartedAtUsesNewestRunningOnRestart(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSummarizeDeployment(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"spec":   map[string]interface{}{"replicas": int64(3)},
-		"status": map[string]interface{}{"replicas": int64(3), "readyReplicas": int64(2), "availableReplicas": int64(2)},
+	obj := u(map[string]any{
+		"spec":   map[string]any{"replicas": int64(3)},
+		"status": map[string]any{"replicas": int64(3), "readyReplicas": int64(2), "availableReplicas": int64(2)},
 	})
 	fields := Summarize("Deployment", obj)
 	if got := mustField(t, fields, "Ready"); got != "2/3" {
@@ -156,7 +156,7 @@ func TestSummarizeDeployment(t *testing.T) {
 }
 
 func TestSummarizeDeploymentZeroReplicas(t *testing.T) {
-	obj := u(map[string]interface{}{})
+	obj := u(map[string]any{})
 	fields := Summarize("Deployment", obj)
 	if got := mustField(t, fields, "Ready"); got != "0/0" {
 		t.Errorf("Ready = %q, want 0/0 for empty deployment", got)
@@ -168,13 +168,13 @@ func TestSummarizeDeploymentZeroReplicas(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSummarizeService(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"spec": map[string]interface{}{
+	obj := u(map[string]any{
+		"spec": map[string]any{
 			"type":      "ClusterIP",
 			"clusterIP": "10.96.0.1",
-			"ports": []interface{}{
-				map[string]interface{}{"port": "80", "protocol": "TCP"},
-				map[string]interface{}{"port": "443", "protocol": "TCP"},
+			"ports": []any{
+				map[string]any{"port": "80", "protocol": "TCP"},
+				map[string]any{"port": "443", "protocol": "TCP"},
 			},
 		},
 	})
@@ -191,8 +191,8 @@ func TestSummarizeService(t *testing.T) {
 }
 
 func TestSummarizeServiceNoPorts(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"spec": map[string]interface{}{"type": "ExternalName"},
+	obj := u(map[string]any{
+		"spec": map[string]any{"type": "ExternalName"},
 	})
 	fields := Summarize("Service", obj)
 	if got := mustField(t, fields, "Ports"); got != "" {
@@ -205,9 +205,9 @@ func TestSummarizeServiceNoPorts(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSummarizeStatefulSet(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"spec":   map[string]interface{}{"replicas": int64(5)},
-		"status": map[string]interface{}{"readyReplicas": int64(4)},
+	obj := u(map[string]any{
+		"spec":   map[string]any{"replicas": int64(5)},
+		"status": map[string]any{"readyReplicas": int64(4)},
 	})
 	fields := Summarize("StatefulSet", obj)
 	if got := mustField(t, fields, "Ready"); got != "4/5" {
@@ -216,8 +216,8 @@ func TestSummarizeStatefulSet(t *testing.T) {
 }
 
 func TestSummarizeDaemonSet(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"status": map[string]interface{}{
+	obj := u(map[string]any{
+		"status": map[string]any{
 			"desiredNumberScheduled": int64(3),
 			"numberReady":            int64(3),
 		},
@@ -232,8 +232,8 @@ func TestSummarizeDaemonSet(t *testing.T) {
 }
 
 func TestSummarizeJob(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"status": map[string]interface{}{
+	obj := u(map[string]any{
+		"status": map[string]any{
 			"succeeded": int64(5),
 			"failed":    int64(1),
 		},
@@ -252,13 +252,13 @@ func TestSummarizeJob(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSummarizeCronJobFull(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"spec": map[string]interface{}{
+	obj := u(map[string]any{
+		"spec": map[string]any{
 			"schedule": "0 * * * *",
 			"suspend":  false,
 		},
-		"status": map[string]interface{}{
-			"active":             []interface{}{map[string]interface{}{}, map[string]interface{}{}},
+		"status": map[string]any{
+			"active":             []any{map[string]any{}, map[string]any{}},
 			"lastScheduleTime":   "2026-02-24T12:00:00Z",
 			"lastSuccessfulTime": "2026-02-24T11:00:00Z",
 		},
@@ -279,8 +279,8 @@ func TestSummarizeCronJobFull(t *testing.T) {
 }
 
 func TestSummarizeCronJobSuspended(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"spec": map[string]interface{}{"schedule": "@daily", "suspend": true},
+	obj := u(map[string]any{
+		"spec": map[string]any{"schedule": "@daily", "suspend": true},
 	})
 	fields := Summarize("CronJob", obj)
 	if got := mustField(t, fields, "Suspend"); got != "true" {
@@ -297,8 +297,8 @@ func TestSummarizeCronJobSuspended(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSummarizeConfigMap(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"data": map[string]interface{}{
+	obj := u(map[string]any{
+		"data": map[string]any{
 			"key1": "val1",
 			"key2": "val2",
 			"key3": "val3",
@@ -311,16 +311,16 @@ func TestSummarizeConfigMap(t *testing.T) {
 }
 
 func TestSummarizeConfigMapEmpty(t *testing.T) {
-	fields := Summarize("ConfigMap", u(map[string]interface{}{}))
+	fields := Summarize("ConfigMap", u(map[string]any{}))
 	if got := mustField(t, fields, "Keys"); got != "0" {
 		t.Errorf("Keys = %q, want 0", got)
 	}
 }
 
 func TestSummarizeSecret(t *testing.T) {
-	obj := u(map[string]interface{}{
+	obj := u(map[string]any{
 		"type": "kubernetes.io/tls",
-		"data": map[string]interface{}{
+		"data": map[string]any{
 			"tls.crt": "base64==",
 			"tls.key": "base64==",
 		},
@@ -339,8 +339,8 @@ func TestSummarizeSecret(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSummarizeNamespace(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"status": map[string]interface{}{"phase": "Active"},
+	obj := u(map[string]any{
+		"status": map[string]any{"phase": "Active"},
 	})
 	fields := Summarize("Namespace", obj)
 	if got := mustField(t, fields, "Status"); got != "Active" {
@@ -353,13 +353,13 @@ func TestSummarizeNamespace(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSummarizeNodeReady(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"status": map[string]interface{}{
-			"conditions": []interface{}{
-				map[string]interface{}{"type": "Ready", "status": "True"},
+	obj := u(map[string]any{
+		"status": map[string]any{
+			"conditions": []any{
+				map[string]any{"type": "Ready", "status": "True"},
 			},
 		},
-		"spec": map[string]interface{}{"unschedulable": false},
+		"spec": map[string]any{"unschedulable": false},
 	})
 	fields := Summarize("Node", obj)
 	if got := mustField(t, fields, "Status"); got != "Ready" {
@@ -371,13 +371,13 @@ func TestSummarizeNodeReady(t *testing.T) {
 }
 
 func TestSummarizeNodeNotReady(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"status": map[string]interface{}{
-			"conditions": []interface{}{
-				map[string]interface{}{"type": "Ready", "status": "False"},
+	obj := u(map[string]any{
+		"status": map[string]any{
+			"conditions": []any{
+				map[string]any{"type": "Ready", "status": "False"},
 			},
 		},
-		"spec": map[string]interface{}{"unschedulable": true},
+		"spec": map[string]any{"unschedulable": true},
 	})
 	fields := Summarize("Node", obj)
 	if got := mustField(t, fields, "Status"); got != "NotReady" {
@@ -389,7 +389,7 @@ func TestSummarizeNodeNotReady(t *testing.T) {
 }
 
 func TestSummarizeNodeNoConditions(t *testing.T) {
-	obj := u(map[string]interface{}{})
+	obj := u(map[string]any{})
 	fields := Summarize("Node", obj)
 	if got := mustField(t, fields, "Status"); got != "Unknown" {
 		t.Errorf("Status = %q, want Unknown for node with no conditions", got)
@@ -401,8 +401,8 @@ func TestSummarizeNodeNoConditions(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSummarizeGenericWithPhase(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"status": map[string]interface{}{"phase": "Bound"},
+	obj := u(map[string]any{
+		"status": map[string]any{"phase": "Bound"},
 	})
 	fields := Summarize("PersistentVolumeClaim", obj)
 	if got := mustField(t, fields, "Phase"); got != "Bound" {
@@ -412,7 +412,7 @@ func TestSummarizeGenericWithPhase(t *testing.T) {
 
 func TestSummarizeGenericNoPhase(t *testing.T) {
 	// Unknown kind with no phase → empty summary is valid (no panic).
-	fields := Summarize("MyCustomResource", u(map[string]interface{}{}))
+	fields := Summarize("MyCustomResource", u(map[string]any{}))
 	if len(fields) != 0 {
 		t.Errorf("expected 0 fields for unknown kind with no phase, got %d: %+v", len(fields), fields)
 	}
@@ -423,17 +423,17 @@ func TestSummarizeGenericNoPhase(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExtractConditions(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"status": map[string]interface{}{
-			"conditions": []interface{}{
-				map[string]interface{}{
+	obj := u(map[string]any{
+		"status": map[string]any{
+			"conditions": []any{
+				map[string]any{
 					"type":               "Ready",
 					"status":             "True",
 					"reason":             "KubeletReady",
 					"message":            "kubelet is posting ready status",
 					"lastTransitionTime": "2026-01-01T00:00:00Z",
 				},
-				map[string]interface{}{
+				map[string]any{
 					"type":   "MemoryPressure",
 					"status": "False",
 				},
@@ -456,7 +456,7 @@ func TestExtractConditions(t *testing.T) {
 }
 
 func TestExtractConditionsEmpty(t *testing.T) {
-	conds := ExtractConditions(u(map[string]interface{}{}))
+	conds := ExtractConditions(u(map[string]any{}))
 	if conds != nil {
 		t.Errorf("expected nil conditions for object with no status, got %+v", conds)
 	}
@@ -471,34 +471,34 @@ func TestExtractConditionsEmpty(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSummarizeIngressFull(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"spec": map[string]interface{}{
+	obj := u(map[string]any{
+		"spec": map[string]any{
 			"ingressClassName": "nginx",
-			"rules": []interface{}{
-				map[string]interface{}{
+			"rules": []any{
+				map[string]any{
 					"host": "foo.example.com",
-					"http": map[string]interface{}{
-						"paths": []interface{}{
-							map[string]interface{}{
-								"backend": map[string]interface{}{
-									"service": map[string]interface{}{
+					"http": map[string]any{
+						"paths": []any{
+							map[string]any{
+								"backend": map[string]any{
+									"service": map[string]any{
 										"name": "my-svc",
-										"port": map[string]interface{}{"number": int64(80)},
+										"port": map[string]any{"number": int64(80)},
 									},
 								},
 							},
 						},
 					},
 				},
-				map[string]interface{}{
+				map[string]any{
 					"host": "bar.example.com",
-					"http": map[string]interface{}{
-						"paths": []interface{}{
-							map[string]interface{}{
-								"backend": map[string]interface{}{
-									"service": map[string]interface{}{
+					"http": map[string]any{
+						"paths": []any{
+							map[string]any{
+								"backend": map[string]any{
+									"service": map[string]any{
 										"name": "other-svc",
-										"port": map[string]interface{}{"number": int64(443)},
+										"port": map[string]any{"number": int64(443)},
 									},
 								},
 							},
@@ -522,26 +522,26 @@ func TestSummarizeIngressFull(t *testing.T) {
 
 func TestSummarizeIngressDeduplicatesBackends(t *testing.T) {
 	// Two paths to the same backend should produce one entry.
-	obj := u(map[string]interface{}{
-		"spec": map[string]interface{}{
-			"rules": []interface{}{
-				map[string]interface{}{
+	obj := u(map[string]any{
+		"spec": map[string]any{
+			"rules": []any{
+				map[string]any{
 					"host": "foo.example.com",
-					"http": map[string]interface{}{
-						"paths": []interface{}{
-							map[string]interface{}{
-								"backend": map[string]interface{}{
-									"service": map[string]interface{}{
+					"http": map[string]any{
+						"paths": []any{
+							map[string]any{
+								"backend": map[string]any{
+									"service": map[string]any{
 										"name": "svc",
-										"port": map[string]interface{}{"number": int64(80)},
+										"port": map[string]any{"number": int64(80)},
 									},
 								},
 							},
-							map[string]interface{}{
-								"backend": map[string]interface{}{
-									"service": map[string]interface{}{
+							map[string]any{
+								"backend": map[string]any{
+									"service": map[string]any{
 										"name": "svc",
-										"port": map[string]interface{}{"number": int64(80)},
+										"port": map[string]any{"number": int64(80)},
 									},
 								},
 							},
@@ -558,7 +558,7 @@ func TestSummarizeIngressDeduplicatesBackends(t *testing.T) {
 }
 
 func TestSummarizeIngressEmpty(t *testing.T) {
-	obj := u(map[string]interface{}{})
+	obj := u(map[string]any{})
 	fields := Summarize("Ingress", obj)
 	if len(fields) != 0 {
 		t.Errorf("expected no fields for empty Ingress, got %+v", fields)
@@ -566,18 +566,18 @@ func TestSummarizeIngressEmpty(t *testing.T) {
 }
 
 func TestSummarizeIngressNoClass(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"spec": map[string]interface{}{
-			"rules": []interface{}{
-				map[string]interface{}{
+	obj := u(map[string]any{
+		"spec": map[string]any{
+			"rules": []any{
+				map[string]any{
 					"host": "foo.example.com",
-					"http": map[string]interface{}{
-						"paths": []interface{}{
-							map[string]interface{}{
-								"backend": map[string]interface{}{
-									"service": map[string]interface{}{
+					"http": map[string]any{
+						"paths": []any{
+							map[string]any{
+								"backend": map[string]any{
+									"service": map[string]any{
 										"name": "svc",
-										"port": map[string]interface{}{"number": float64(8080)},
+										"port": map[string]any{"number": float64(8080)},
 									},
 								},
 							},
@@ -597,24 +597,24 @@ func TestSummarizeIngressNoClass(t *testing.T) {
 }
 
 func TestSummarizeIngressDefaultBackendAndNamedPort(t *testing.T) {
-	obj := u(map[string]interface{}{
-		"spec": map[string]interface{}{
-			"defaultBackend": map[string]interface{}{
-				"service": map[string]interface{}{
+	obj := u(map[string]any{
+		"spec": map[string]any{
+			"defaultBackend": map[string]any{
+				"service": map[string]any{
 					"name": "fallback-svc",
-					"port": map[string]interface{}{"name": "http"},
+					"port": map[string]any{"name": "http"},
 				},
 			},
-			"rules": []interface{}{
-				map[string]interface{}{
+			"rules": []any{
+				map[string]any{
 					"host": "foo.example.com",
-					"http": map[string]interface{}{
-						"paths": []interface{}{
-							map[string]interface{}{
-								"backend": map[string]interface{}{
-									"service": map[string]interface{}{
+					"http": map[string]any{
+						"paths": []any{
+							map[string]any{
+								"backend": map[string]any{
+									"service": map[string]any{
 										"name": "svc",
-										"port": map[string]interface{}{"name": "https"},
+										"port": map[string]any{"name": "https"},
 									},
 								},
 							},
@@ -631,7 +631,7 @@ func TestSummarizeIngressDefaultBackendAndNamedPort(t *testing.T) {
 }
 
 func TestGetString(t *testing.T) {
-	m := map[string]interface{}{
+	m := map[string]any{
 		"str":  "hello",
 		"num":  int64(42),
 		"bool": true,

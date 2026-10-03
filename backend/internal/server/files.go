@@ -120,7 +120,7 @@ type fileEntry struct {
 
 func parseLsOutput(output string) []fileEntry {
 	var entries []fileEntry
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if line == "" || strings.HasPrefix(line, "total ") {
 			continue
@@ -342,4 +342,3 @@ func (s *Server) handleFileMkdir() http.HandlerFunc {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }
-

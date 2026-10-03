@@ -297,10 +297,3 @@ func searchInEntries(entries []searchIndexEntry, query, namespace string, limit 
 	}
 	return out
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
