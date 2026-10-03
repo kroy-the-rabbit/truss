@@ -7,6 +7,7 @@ import (
 	"time"
 
 	disc "github.com/kroy/truss/backend/internal/discovery"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -148,9 +149,10 @@ type Manager struct {
 	subs      map[string]*subscriberSet
 	nextSubID int
 
-	hooksMu      sync.RWMutex
-	unhealthy    func(contextName string) bool
-	onWatchError func(contextName string, err error)
+	hooksMu        sync.RWMutex
+	unhealthy      func(contextName string) bool
+	onWatchError   func(contextName string, err error)
+	onResourceGone func(contextName string, gvr schema.GroupVersionResource)
 
 	// Test seams.
 	subBuffer   int
@@ -178,6 +180,33 @@ func (m *Manager) isUnhealthy(contextName string) bool {
 	fn := m.unhealthy
 	m.hooksMu.RUnlock()
 	return fn != nil && fn(contextName)
+}
+
+// SetResourceGoneHandler registers fn to be called when an informer's list or
+// watch fails because the server no longer serves its resource (404 or 405),
+// e.g. a CRD version was removed. The caller should refresh discovery and
+// restart the context's informers without that resource; otherwise the
+// informer retries against it forever. fn is called at most once per GVR per
+// informer generation, on its own goroutine.
+func (m *Manager) SetResourceGoneHandler(fn func(contextName string, gvr schema.GroupVersionResource)) {
+	m.hooksMu.Lock()
+	m.onResourceGone = fn
+	m.hooksMu.Unlock()
+}
+
+// isResourceGone reports whether a list/watch error means the resource is not
+// served at all, as opposed to a transient or auth failure.
+func isResourceGone(err error) bool {
+	return apierrors.IsNotFound(err) || apierrors.IsMethodNotSupported(err)
+}
+
+func (m *Manager) reportResourceGone(contextName string, gvr schema.GroupVersionResource) {
+	m.hooksMu.RLock()
+	fn := m.onResourceGone
+	m.hooksMu.RUnlock()
+	if fn != nil {
+		go fn(contextName, gvr)
+	}
 }
 
 func (m *Manager) reportWatchError(contextName string, err error) {
@@ -229,12 +258,25 @@ func (m *Manager) EnsureStarted(contextName string, dynClient dynamic.Interface,
 		}
 		cc.touch(m.now())
 		for _, r := range resources {
+			// Informers need list+watch; starting one for a resource without
+			// them (tokenreviews, metrics.k8s.io pods) only produces endless
+			// retries.
+			if !r.Watchable() {
+				continue
+			}
 			gvr := schema.GroupVersionResource{Group: r.Group, Version: r.Version, Resource: r.Resource}
 			if _, exists := cc.gvrs[gvr]; !exists {
 				inf := cc.factory.ForResource(gvr)
+				var goneReported atomic.Bool
 				_ = inf.Informer().SetWatchErrorHandlerWithContext(func(ctx context.Context, r *kcache.Reflector, err error) {
 					if !cc.stopped.Load() {
-						m.reportWatchError(contextName, err)
+						if isResourceGone(err) {
+							if goneReported.CompareAndSwap(false, true) {
+								m.reportResourceGone(contextName, gvr)
+							}
+						} else {
+							m.reportWatchError(contextName, err)
+						}
 					}
 					kcache.DefaultWatchErrorHandler(ctx, r, err)
 				})

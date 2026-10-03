@@ -61,6 +61,8 @@ type Server struct {
 	searchMu       sync.RWMutex
 	searchIndexes  map[string]*searchIndexState
 	watchCache     *watchcache.Manager
+	goneMu         sync.Mutex           // guards goneLast
+	goneLast       map[string]time.Time // last informer rebuild per context; see resource_gone.go
 	portForwards   *portforward.Manager
 	// writeEnabled is false (read-only) by default so the zero value fails
 	// closed; see ReadOnly/SetReadOnly in readonly.go.
@@ -80,6 +82,7 @@ func New(kubeMgr *kube.Manager, store *contextstore.Store, version string) *Serv
 		watchCache:     newHealthAwareWatchCache(kubeMgr),
 	}
 	s.portForwards = newPortForwardManager(s)
+	s.watchCache.SetResourceGoneHandler(s.handleResourceGone)
 	// The daemon always starts read-only; the UI must opt in to write mode.
 	s.SetReadOnly(true)
 	return s

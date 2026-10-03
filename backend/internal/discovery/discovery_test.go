@@ -205,8 +205,8 @@ func TestSaveToDiskAndLoadFromDisk(t *testing.T) {
 	if err := json.Unmarshal(b, &dc); err != nil {
 		t.Fatalf("cache file is invalid JSON: %v", err)
 	}
-	if dc.Version != 2 {
-		t.Errorf("disk cache version = %d, want 2", dc.Version)
+	if dc.Version != diskCacheVersion {
+		t.Errorf("disk cache version = %d, want %d", dc.Version, diskCacheVersion)
 	}
 	if len(dc.Contexts["my-ctx"]) != 2 {
 		t.Errorf("expected 2 resources for my-ctx, got %d", len(dc.Contexts["my-ctx"]))

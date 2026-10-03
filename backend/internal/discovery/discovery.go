@@ -21,18 +21,48 @@ type ResourceInfo struct {
 	Resource   string // plural name
 	Namespaced bool
 	Category   string
+	Verbs      []string // verbs the API server reports for this resource
 }
+
+// Watchable reports whether the resource supports both list and watch, which
+// an informer needs. Resources discovered before verbs were recorded (nil
+// Verbs) are treated as watchable.
+func (r ResourceInfo) Watchable() bool {
+	if r.Verbs == nil {
+		return true
+	}
+	return hasVerb(r.Verbs, "list") && hasVerb(r.Verbs, "watch")
+}
+
+func hasVerb(verbs []string, verb string) bool {
+	for _, v := range verbs {
+		if v == verb {
+			return true
+		}
+	}
+	return false
+}
+
+// cacheTTL is how long a discovery result is trusted before it is refetched.
+// CRDs and served API versions change over time; a result that never expires
+// makes informers watch API versions the server has since dropped.
+const cacheTTL = 24 * time.Hour
+
+// diskCacheVersion 3 added Verbs and per-context fetch times.
+const diskCacheVersion = 3
 
 // Cache caches API discovery results per context.
 type Cache struct {
 	mu          sync.RWMutex
 	cache       map[string][]ResourceInfo
+	fetched     map[string]time.Time // when each context was last discovered
 	persistPath string
+	now         func() time.Time // overridable in tests
 }
 
 // NewCache creates a new discovery cache.
 func NewCache() *Cache {
-	c := &Cache{cache: make(map[string][]ResourceInfo)}
+	c := &Cache{cache: make(map[string][]ResourceInfo), fetched: make(map[string]time.Time)}
 	if p, err := defaultCachePath(); err == nil {
 		c.persistPath = p
 		c.loadFromDisk()
@@ -44,6 +74,14 @@ type diskCache struct {
 	Version   int                       `json:"version"`
 	UpdatedAt string                    `json:"updated_at,omitempty"`
 	Contexts  map[string][]ResourceInfo `json:"contexts"`
+	Fetched   map[string]time.Time      `json:"fetched,omitempty"`
+}
+
+func (c *Cache) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 // categoryMap maps API groups to UI categories.
@@ -162,14 +200,15 @@ var deprecatedResourceNames = map[string]bool{
 }
 
 // Discover fetches resource kinds from a cluster using API discovery.
+// A cached result is served until it is older than cacheTTL; if refetching a
+// stale result fails, the stale result is returned rather than an error.
 func (c *Cache) Discover(contextName string, disc discovery.DiscoveryInterface, force bool) ([]ResourceInfo, error) {
-	if !force {
-		c.mu.RLock()
-		if cached, ok := c.cache[contextName]; ok {
-			c.mu.RUnlock()
-			return cached, nil
-		}
-		c.mu.RUnlock()
+	c.mu.RLock()
+	cached, haveCached := c.cache[contextName]
+	fetchedAt, haveTime := c.fetched[contextName]
+	c.mu.RUnlock()
+	if !force && haveCached && haveTime && c.clock().Sub(fetchedAt) < cacheTTL {
+		return cached, nil
 	}
 
 	// ServerPreferredResources returns only the server's preferred (highest stable)
@@ -178,6 +217,9 @@ func (c *Cache) Discover(contextName string, disc discovery.DiscoveryInterface, 
 	if err != nil {
 		// Partial results are OK — some groups may fail (e.g. metrics-server absent).
 		if apiResourceLists == nil {
+			if haveCached && !force {
+				return cached, nil
+			}
 			return nil, err
 		}
 	}
@@ -204,6 +246,11 @@ func (c *Cache) Discover(contextName string, disc discovery.DiscoveryInterface, 
 			if r.Kind == "" {
 				continue
 			}
+			// Skip resources that cannot be listed (e.g. tokenreviews,
+			// selfsubjectreviews): there is nothing to show or watch.
+			if !hasVerb(r.Verbs, "list") {
+				continue
+			}
 			key := gv.Group + "/" + r.Kind
 			if seen[key] {
 				continue
@@ -226,6 +273,7 @@ func (c *Cache) Discover(contextName string, disc discovery.DiscoveryInterface, 
 				Resource:   r.Name,
 				Namespaced: r.Namespaced,
 				Category:   cat,
+				Verbs:      append([]string(nil), r.Verbs...),
 			})
 		}
 	}
@@ -262,6 +310,10 @@ func (c *Cache) Discover(contextName string, disc discovery.DiscoveryInterface, 
 
 	c.mu.Lock()
 	c.cache[contextName] = resources
+	if c.fetched == nil {
+		c.fetched = make(map[string]time.Time)
+	}
+	c.fetched[contextName] = c.clock()
 	c.mu.Unlock()
 	c.saveToDisk()
 
@@ -273,6 +325,7 @@ func (c *Cache) Invalidate(contextName string) {
 	c.mu.Lock()
 	_, ok := c.cache[contextName]
 	delete(c.cache, contextName)
+	delete(c.fetched, contextName)
 	c.mu.Unlock()
 	if ok {
 		c.saveToDisk()
@@ -313,13 +366,17 @@ func (c *Cache) loadFromDisk() {
 		return
 	}
 	var dc diskCache
-	// Version 2: switched to ServerPreferredResources — reject older caches so
-	// deprecated API versions are not served from stale disk state.
-	if err := json.Unmarshal(b, &dc); err != nil || dc.Contexts == nil || dc.Version < 2 {
+	// Reject caches from older formats: v2 had no verbs or fetch times, so its
+	// entries could never expire.
+	if err := json.Unmarshal(b, &dc); err != nil || dc.Contexts == nil || dc.Version < diskCacheVersion {
 		return
+	}
+	if dc.Fetched == nil {
+		dc.Fetched = make(map[string]time.Time)
 	}
 	c.mu.Lock()
 	c.cache = dc.Contexts
+	c.fetched = dc.Fetched
 	c.mu.Unlock()
 }
 
@@ -334,15 +391,20 @@ func (c *Cache) saveToDisk() {
 		copy(cp, v)
 		snapshot[k] = cp
 	}
+	fetched := make(map[string]time.Time, len(c.fetched))
+	for k, v := range c.fetched {
+		fetched[k] = v
+	}
 	c.mu.RUnlock()
 
 	if err := os.MkdirAll(filepath.Dir(c.persistPath), 0o700); err != nil {
 		return
 	}
 	payload, err := json.Marshal(diskCache{
-		Version:   2,
+		Version:   diskCacheVersion,
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 		Contexts:  snapshot,
+		Fetched:   fetched,
 	})
 	if err != nil {
 		return
