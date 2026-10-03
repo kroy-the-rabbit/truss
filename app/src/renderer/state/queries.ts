@@ -12,6 +12,7 @@ import {
 } from '../api/client';
 import type { GVR } from '../api/gen/truss/v1/resources_pb';
 import { useAppStore } from './store';
+import { friendlyErrorMessage } from '../api/readOnlyErrors';
 
 async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -756,7 +757,7 @@ export function useDebugNode() {
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({ error: 'unknown error' })) as { error?: string };
-        throw new Error(err.error ?? 'failed to create debug pod');
+        throw new Error(friendlyErrorMessage(err.error ?? 'failed to create debug pod'));
       }
       return r.json();
     },
@@ -774,7 +775,7 @@ export function useDeleteDebugPod() {
       const r = await fetchSetupAPI(`/api/nodes/debug/delete?${qs}`, { method: 'DELETE' });
       if (!r.ok) {
         const err = await r.json().catch(() => ({ error: 'unknown error' })) as { error?: string };
-        throw new Error(err.error ?? 'failed to delete debug pod');
+        throw new Error(friendlyErrorMessage(err.error ?? 'failed to delete debug pod'));
       }
     },
     onSuccess: (_data, params) => {

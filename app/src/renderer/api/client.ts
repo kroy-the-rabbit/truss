@@ -1,5 +1,6 @@
 import { createConnectTransport } from '@connectrpc/connect-web';
-import { createPromiseClient } from '@connectrpc/connect';
+import { Code, ConnectError, createPromiseClient } from '@connectrpc/connect';
+import { DAEMON_READ_ONLY_MESSAGE, READ_ONLY_USER_MESSAGE } from './readOnlyErrors';
 import { HealthService } from './gen/truss/v1/health_connect';
 import { ContextsService } from './gen/truss/v1/contexts_connect';
 import { DiscoveryService } from './gen/truss/v1/discovery_connect';
@@ -33,7 +34,16 @@ async function getTransport() {
     interceptors: [
       (next) => async (req) => {
         req.header.set('Authorization', `Bearer ${config.token}`);
-        return next(req);
+        try {
+          return await next(req);
+        } catch (err) {
+          // Replace the daemon's terse read-only rejection with a clear message.
+          const ce = ConnectError.from(err);
+          if (ce.code === Code.PermissionDenied && ce.rawMessage === DAEMON_READ_ONLY_MESSAGE) {
+            throw new ConnectError(READ_ONLY_USER_MESSAGE, Code.PermissionDenied);
+          }
+          throw err;
+        }
       },
     ],
   });

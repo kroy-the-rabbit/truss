@@ -273,6 +273,9 @@ func (s *Server) handleFileUpload() http.HandlerFunc {
 			http.Error(w, "POST required", http.StatusMethodNotAllowed)
 			return
 		}
+		if s.rejectIfReadOnly(w) {
+			return
+		}
 		q := r.URL.Query()
 		ctxName := q.Get("context")
 		if ctxName == "" {
@@ -312,6 +315,9 @@ func (s *Server) handleFileUpload() http.HandlerFunc {
 // POST /api/file/mkdir?context=&namespace=&pod=&container=&path=
 func (s *Server) handleFileMkdir() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.rejectIfReadOnly(w) {
+			return
+		}
 		q := r.URL.Query()
 		ctxName := q.Get("context")
 		if ctxName == "" {

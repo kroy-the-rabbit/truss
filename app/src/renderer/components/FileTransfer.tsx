@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { usePodInfo } from '../state/queries';
 import { isSafeRemoteName } from '../lib/safeRemoteName';
+import { useDaemonReadOnly } from '../state/readOnlySync';
 
 interface FileEntry {
   name: string;
@@ -146,6 +147,8 @@ export function FileTransfer({ context, namespace, pod, initialContainer }: File
   const api = (window as any).electronAPI;
 
   const podInfo = usePodInfo(context, namespace, pod);
+  // Popouts have their own store, so read RO state from the daemon (fails closed).
+  const readOnly = useDaemonReadOnly();
   const allContainers = podInfo.data?.containers?.filter((c) => !c.isInit) ?? [];
   const [container, setContainer] = useState(initialContainer || '');
 
@@ -420,7 +423,7 @@ export function FileTransfer({ context, namespace, pod, initialContainer }: File
 
   // Upload: local → container
   const upload = async () => {
-    if (!localSelected) return;
+    if (readOnly || !localSelected) return;
     const selectedEntry = localEntries.find((e) => e.name === localSelected);
     if (!selectedEntry) return;
 
@@ -490,7 +493,7 @@ export function FileTransfer({ context, namespace, pod, initialContainer }: File
 
   const canDownload = !!containerSelected && !transfer &&
     containerEntries.find((e) => e.name === containerSelected);
-  const canUpload = !!localSelected && !transfer &&
+  const canUpload = !readOnly && !!localSelected && !transfer &&
     localEntries.find((e) => e.name === localSelected);
 
   const progressPct = transfer && transfer.total > 0
@@ -546,7 +549,9 @@ export function FileTransfer({ context, namespace, pod, initialContainer }: File
             className="ft-transfer-btn ft-upload-btn"
             onClick={upload}
             disabled={!canUpload}
-            title="Copy selected file/folder from local directory to container"
+            title={readOnly
+              ? 'Uploading is disabled in read-only (RO) mode; switch to Write mode'
+              : 'Copy selected file/folder from local directory to container'}
           >
             ← To Pod
           </button>

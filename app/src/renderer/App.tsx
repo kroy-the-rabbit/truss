@@ -15,6 +15,7 @@ import { fetchSetupAPI, getResourcesClient } from './api/client';
 import { PluginProvider } from './plugins';
 import { pluginRegistry } from './plugins';
 import { useLiveResourceInvalidation } from './hooks/useLiveResourceInvalidation';
+import { useReadOnlySync } from './state/readOnlySync';
 import { ToastContainer } from './components/ToastContainer';
 import './styles.css';
 
@@ -83,6 +84,8 @@ function AppLayout() {
   } = useAppStore();
   const qc = useQueryClient();
   useLiveResourceInvalidation();
+  // Keep the daemon's server-side read-only gate in sync with the RO/Write toggle.
+  useReadOnlySync();
 
   // Restore navigation position on mount.
   // Priority: sessionStorage (lock/unlock path) → localStorage (restart path).

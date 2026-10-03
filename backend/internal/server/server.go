@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -60,11 +61,14 @@ type Server struct {
 	searchMu       sync.RWMutex
 	searchIndexes  map[string]*searchIndexState
 	watchCache     *watchcache.Manager
+	// writeEnabled is false (read-only) by default so the zero value fails
+	// closed; see ReadOnly/SetReadOnly in readonly.go.
+	writeEnabled atomic.Bool
 }
 
 // New creates a new Server.
 func New(kubeMgr *kube.Manager, store *contextstore.Store, version string) *Server {
-	return &Server{
+	s := &Server{
 		kubeMgr:        kubeMgr,
 		store:          store,
 		discoveryCache: disc.NewCache(),
@@ -72,20 +76,26 @@ func New(kubeMgr *kube.Manager, store *contextstore.Store, version string) *Serv
 		searchIndexes:  make(map[string]*searchIndexState),
 		watchCache:     watchcache.New(),
 	}
+	// The daemon always starts read-only; the UI must opt in to write mode.
+	s.SetReadOnly(true)
+	return s
 }
 
-// Start starts the HTTP server on a random localhost port. Returns the port and any error.
-func (s *Server) Start(token string) (int, error) {
+// newMux registers all Connect services and REST/WebSocket routes. Auth is
+// applied by Start, not here.
+func (s *Server) newMux(token string) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// Register Connect services.
-	mux.Handle(trussv1connect.NewHealthServiceHandler(s))
-	mux.Handle(trussv1connect.NewContextsServiceHandler(s))
-	mux.Handle(trussv1connect.NewDiscoveryServiceHandler(s))
-	mux.Handle(trussv1connect.NewResourcesServiceHandler(s))
-	mux.Handle(trussv1connect.NewYamlServiceHandler(s))
-	mux.Handle(trussv1connect.NewHelmServiceHandler(s))
-	mux.Handle(trussv1connect.NewOverviewServiceHandler(s))
+	// Register Connect services. The read-only interceptor rejects mutating
+	// procedures while the daemon is in read-only mode.
+	connectOpts := connect.WithInterceptors(readOnlyInterceptor{s: s})
+	mux.Handle(trussv1connect.NewHealthServiceHandler(s, connectOpts))
+	mux.Handle(trussv1connect.NewContextsServiceHandler(s, connectOpts))
+	mux.Handle(trussv1connect.NewDiscoveryServiceHandler(s, connectOpts))
+	mux.Handle(trussv1connect.NewResourcesServiceHandler(s, connectOpts))
+	mux.Handle(trussv1connect.NewYamlServiceHandler(s, connectOpts))
+	mux.Handle(trussv1connect.NewHelmServiceHandler(s, connectOpts))
+	mux.Handle(trussv1connect.NewOverviewServiceHandler(s, connectOpts))
 
 	// Register WebSocket exec handler.
 	mux.HandleFunc("/ws/exec", s.handleExecWS(token))
@@ -121,6 +131,7 @@ func (s *Server) Start(token string) (int, error) {
 	mux.HandleFunc("/api/plugins/secure-storage/set", s.handlePluginSecureStorageSet)
 	mux.HandleFunc("/api/plugins/secure-storage/delete", s.handlePluginSecureStorageDelete)
 	mux.HandleFunc("/api/search/resources", s.handleSearchResources)
+	mux.HandleFunc("/api/readonly", s.handleReadOnly)
 
 	// Register metrics/observability REST endpoints.
 	mux.HandleFunc("/api/metrics/prometheus/discover", s.handleMetricsDiscover)
@@ -131,6 +142,13 @@ func (s *Server) Start(token string) (int, error) {
 	// Node debug pod endpoints.
 	mux.HandleFunc("/api/nodes/debug", s.handleNodeDebug)
 	mux.HandleFunc("/api/nodes/debug/delete", s.handleNodeDebugDelete)
+
+	return mux
+}
+
+// Start starts the HTTP server on a random localhost port. Returns the port and any error.
+func (s *Server) Start(token string) (int, error) {
+	mux := s.newMux(token)
 
 	// Wrap with auth middleware.
 	handler := auth.Middleware(token)(mux)

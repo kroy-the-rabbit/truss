@@ -26,6 +26,7 @@ func TestHandleNodeDebugMethodGuard(t *testing.T) {
 // TestHandleNodeDebugMissingNode verifies that a missing node field returns 400.
 func TestHandleNodeDebugMissingNode(t *testing.T) {
 	srv := &Server{}
+	srv.SetReadOnly(false)
 	body := `{"namespace":"default","image":"busybox"}`
 	r := httptest.NewRequest(http.MethodPost, "/api/nodes/debug", jsonBody(body))
 	r.Header.Set("Content-Type", "application/json")
@@ -40,6 +41,7 @@ func TestHandleNodeDebugMissingNode(t *testing.T) {
 // TestHandleNodeDebugInvalidJSON verifies that malformed JSON returns 400.
 func TestHandleNodeDebugInvalidJSON(t *testing.T) {
 	srv := &Server{}
+	srv.SetReadOnly(false)
 	r := httptest.NewRequest(http.MethodPost, "/api/nodes/debug", jsonBody(`not json`))
 	w := httptest.NewRecorder()
 	srv.handleNodeDebug(w, r)
@@ -67,6 +69,7 @@ func TestHandleNodeDebugDeleteMethodGuard(t *testing.T) {
 // context=test is required so resolveContext doesn't need an active kubeMgr.
 func TestHandleNodeDebugDeleteMissingPod(t *testing.T) {
 	srv := &Server{}
+	srv.SetReadOnly(false)
 	r := httptest.NewRequest(http.MethodDelete, "/api/nodes/debug/delete?context=test&namespace=default", nil)
 	w := httptest.NewRecorder()
 	srv.handleNodeDebugDelete(w, r)
