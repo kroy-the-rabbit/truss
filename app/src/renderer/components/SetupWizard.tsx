@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { fetchSetupAPI } from '../api/client';
+import { pendingApprovalsFromImport } from '../state/contextHealth';
+import { ExecApprovalModal, type PendingExecApproval } from './ExecApprovalModal';
 
 interface Props {
   onComplete: () => void;
@@ -38,6 +40,7 @@ export function SetupWizard({ onComplete }: Props) {
   const [importDisplayName, setImportDisplayName] = useState('');
   const [selectedSystemCtx, setSelectedSystemCtx] = useState('');
   const [importError, setImportError] = useState('');
+  const [pendingApprovals, setPendingApprovals] = useState<PendingExecApproval[] | null>(null);
   const [importing, setImporting] = useState(false);
   const [importedNames, setImportedNames] = useState<string[]>([]);
 
@@ -137,6 +140,8 @@ export function SetupWizard({ onComplete }: Props) {
         body: JSON.stringify(body),
       });
       if (resp.ok) {
+        const pending = pendingApprovalsFromImport(await resp.json().catch(() => null));
+        if (pending.length > 0) setPendingApprovals(pending);
         setImportedNames((prev) => [...prev, importName.trim()]);
         setImportName('');
         setImportDisplayName('');
@@ -392,6 +397,9 @@ export function SetupWizard({ onComplete }: Props) {
           </div>
         </form>
       </div>
+      {pendingApprovals && (
+        <ExecApprovalModal items={pendingApprovals} onClose={() => setPendingApprovals(null)} />
+      )}
     </div>
   );
 }

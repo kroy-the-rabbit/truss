@@ -150,6 +150,8 @@ func (m *Manager) RefreshFromStore() {
 // GetClientSet returns or creates a ClientSet for the given context name.
 // While the context's auth circuit breaker is open it returns the cached
 // classified error without building a client or invoking a credential plugin.
+// A context whose exec/auth-provider/file-reference configuration is not
+// approved gets an EXEC_APPROVAL_REQUIRED *AuthError and no client.
 func (m *Manager) GetClientSet(contextName string) (*ClientSet, error) {
 	if err := m.breakerError(contextName); err != nil {
 		return nil, err
@@ -172,6 +174,12 @@ func (m *Manager) GetClientSet(contextName string) (*ClientSet, error) {
 	entry, ok := m.store.GetContextEntry(contextName)
 	if !ok {
 		return nil, fmt.Errorf("context %q not found in store", contextName)
+	}
+
+	// Never let client-go run an exec plugin / auth-provider or follow local
+	// file references the user has not approved in their current form.
+	if err := m.checkExecApproval(contextName, entry); err != nil {
+		return nil, err
 	}
 
 	restConfig, err := clientcmd.RESTConfigFromKubeConfig([]byte(entry.Kubeconfig))

@@ -120,6 +120,9 @@ func (s *Server) newMux(token string) *http.ServeMux {
 	mux.HandleFunc("/api/context-preflight", s.handleContextPreflight)
 	mux.HandleFunc("/api/context-health", s.handleContextHealth)
 	mux.HandleFunc("/api/contexts/reauth", s.handleContextReauth)
+	mux.HandleFunc("/api/contexts/approve-exec", s.handleContextApproveExec)
+	mux.HandleFunc("/api/contexts/revoke-exec", s.handleContextRevokeExec)
+	mux.HandleFunc("/api/contexts/exec-approvals", s.handleContextExecApprovals)
 	mux.HandleFunc("/api/setup/reset", s.handleSetupReset)
 	mux.HandleFunc("/api/gpg-keys", s.handleGPGKeys)
 	mux.HandleFunc("/api/kubeconfig-contexts", s.handleKubeconfigContexts)
@@ -2639,13 +2642,22 @@ func (s *Server) handleContextsImport(w http.ResponseWriter, r *http.Request) {
 	// Invalidate any cached client and watch cache so the new kubeconfig takes effect.
 	s.kubeMgr.InvalidateClient(body.Name)
 	s.watchCache.Invalidate(body.Name)
-	s.restartWatchedInformers(body.Name)
 	// Ensure an active context is set.
 	if s.kubeMgr.ActiveContext() == "" {
 		_ = s.kubeMgr.SetActiveContext(body.Name)
 	}
-	s.triggerSearchIndexRefresh(body.Name)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// Saving is fine (the vault is encrypted); connecting is gated: a context
+	// whose exec plugin / auth-provider / file references are not approved
+	// must not build a client, start informers or index.
+	imported := importedContextResult(s.kubeMgr, body.Name)
+	if !imported.RequiresApproval {
+		s.restartWatchedInformers(body.Name)
+		s.triggerSearchIndexRefresh(body.Name)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "ok",
+		"contexts": []importedContext{imported},
+	})
 }
 
 func (s *Server) handleContextsDelete(w http.ResponseWriter, r *http.Request) {

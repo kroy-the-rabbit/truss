@@ -5684,3 +5684,123 @@ body {
   border-top: 1px solid var(--border);
   padding-top: 12px;
 }
+
+/* ── Exec credential approval ─────────────────────────────────────────── */
+.modal-content.exec-approval-modal {
+  max-width: 720px;
+  width: min(92vw, 720px);
+}
+
+.exec-approval-body {
+  padding: 12px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.exec-approval-intro {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.exec-approval-item {
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--warning) 6%, var(--bg-secondary));
+}
+
+.exec-approval-name {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+  color: var(--text-primary);
+}
+
+.exec-approval-label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.exec-approval-command {
+  margin: 4px 0 8px;
+  padding: 8px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-primary);
+}
+
+.exec-approval-row {
+  margin: 4px 0;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.exec-approval-files {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.exec-approval-field {
+  color: var(--text-dim);
+}
+
+.exec-approval-warning {
+  margin: 10px 0 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.exec-approval-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.exec-approval-status {
+  margin-top: 10px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.cm-badge-exec {
+  display: inline-block;
+  font-size: 0.68rem;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 3px;
+  padding: 0 5px;
+  margin-left: 5px;
+  vertical-align: middle;
+}
+
+.cm-badge-exec-pending {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.cm-btn-revoke {
+  font-size: 0.72rem;
+  padding: 2px 7px;
+  margin-right: 4px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cm-btn-revoke:hover {
+  border-color: var(--warning);
+  color: var(--warning);
+}

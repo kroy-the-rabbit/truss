@@ -1,9 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { fetchSetupAPI } from '../api/client';
 import { useContexts, useProfiles } from '../state/queries';
 import { useAppStore } from '../state/store';
 import { Modal } from './Modal';
 import { useToast } from '../hooks/useToast';
+import {
+  type ExecApprovalItem,
+  fetchExecApprovals,
+  pendingApprovalsFromImport,
+  postRevokeExec,
+  recordContextHealth,
+} from '../state/contextHealth';
+import { ExecApprovalModal, type PendingExecApproval } from './ExecApprovalModal';
 
 interface Props {
   onClose: () => void;
@@ -23,6 +32,7 @@ export function ContextManager({ onClose, onContextsChanged, onProfilesChanged }
   const storedContexts = storedQuery.data?.contexts ?? [];
   const { activeProfile, setActiveProfile } = useAppStore();
   const addToast = useToast((s) => s.addToast);
+  const queryClient = useQueryClient();
 
   const [systemContexts, setSystemContexts] = useState<SystemContext[]>([]);
   const [systemLoading, setSystemLoading] = useState(false);
@@ -42,6 +52,41 @@ export function ContextManager({ onClose, onContextsChanged, onProfilesChanged }
   const [pasteDisplayName, setPasteDisplayName] = useState('');
   const [pasteError, setPasteError] = useState('');
   const [pasteImporting, setPasteImporting] = useState(false);
+
+  const [execApprovals, setExecApprovals] = useState<Record<string, ExecApprovalItem>>({});
+  const [pendingApprovals, setPendingApprovals] = useState<PendingExecApproval[] | null>(null);
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
+
+  const refreshExecApprovals = useCallback(async () => {
+    const items = await fetchExecApprovals().catch(() => [] as ExecApprovalItem[]);
+    setExecApprovals(Object.fromEntries(items.map((i) => [i.name, i])));
+  }, []);
+
+  useEffect(() => {
+    void refreshExecApprovals();
+  }, [refreshExecApprovals, storedQuery.data]);
+
+  const handleImportResponse = async (resp: Response) => {
+    const data = await resp.json().catch(() => null);
+    const pending = pendingApprovalsFromImport(data);
+    if (pending.length > 0) setPendingApprovals(pending);
+    void refreshExecApprovals();
+  };
+
+  const handleRevoke = async (name: string) => {
+    if (confirmRevoke !== name) {
+      setConfirmRevoke(name);
+      return;
+    }
+    setConfirmRevoke(null);
+    try {
+      const health = await postRevokeExec(name);
+      recordContextHealth(health, queryClient);
+      void refreshExecApprovals();
+    } catch (err) {
+      addToast('error', `Failed to revoke approval: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
 
   useEffect(() => {
     setSystemLoading(true);
@@ -97,6 +142,7 @@ export function ContextManager({ onClose, onContextsChanged, onProfilesChanged }
         body: JSON.stringify({ name: ctx.name, system_context: ctx.name }),
       });
       if (resp.ok) {
+        await handleImportResponse(resp);
         storedQuery.refetch();
         onContextsChanged();
       } else {
@@ -146,6 +192,7 @@ export function ContextManager({ onClose, onContextsChanged, onProfilesChanged }
         }),
       });
       if (resp.ok) {
+        await handleImportResponse(resp);
         setPasteName('');
         setPasteDisplayName('');
         setPasteYaml('');
@@ -265,6 +312,7 @@ export function ContextManager({ onClose, onContextsChanged, onProfilesChanged }
   const profilePalette = ['#5b8def', '#3aa99f', '#c77dff', '#f4a259', '#e76f51', '#8ab17d', '#7f90a0', ''];
 
   return (
+    <>
     <Modal
       onClose={onClose}
       labelledBy="context-manager-title"
@@ -428,7 +476,36 @@ export function ContextManager({ onClose, onContextsChanged, onProfilesChanged }
                   <div className="cm-item-info">
                     <span className="cm-item-name" title={ctx.name}>{ctx.name}</span>
                     {ctx.isActive && <span className="cm-badge-active">active</span>}
+                    {execApprovals[ctx.name] && (
+                      <span
+                        className={`cm-badge-exec ${execApprovals[ctx.name].approved ? '' : 'cm-badge-exec-pending'}`}
+                        title={
+                          execApprovals[ctx.name].sensitive.exec?.command_line ||
+                          execApprovals[ctx.name].sensitive.auth_provider ||
+                          'Reads local files'
+                        }
+                      >
+                        {execApprovals[ctx.name].sensitive.exec ? 'runs command' : 'local auth'}
+                        {execApprovals[ctx.name].approved ? '' : ' · not approved'}
+                      </span>
+                    )}
                   </div>
+                  {execApprovals[ctx.name] && (execApprovals[ctx.name].approved ? (
+                    <button
+                      className="cm-btn-revoke"
+                      onClick={() => void handleRevoke(ctx.name)}
+                      title="Stop Truss from running this context's command until approved again"
+                    >
+                      {confirmRevoke === ctx.name ? 'Confirm revoke' : 'Revoke'}
+                    </button>
+                  ) : (
+                    <button
+                      className="cm-btn-import"
+                      onClick={() => setPendingApprovals([{ name: ctx.name, sensitive: execApprovals[ctx.name].sensitive }])}
+                    >
+                      Review
+                    </button>
+                  ))}
                   <button
                     className={`cm-btn-delete ${confirmDelete === ctx.name ? 'cm-btn-delete-confirm' : ''}`}
                     onClick={() => handleDelete(ctx.name)}
@@ -489,5 +566,16 @@ export function ContextManager({ onClose, onContextsChanged, onProfilesChanged }
           )}
         </div>
     </Modal>
+    {pendingApprovals && pendingApprovals.length > 0 && (
+      <ExecApprovalModal
+        items={pendingApprovals}
+        onClose={() => {
+          setPendingApprovals(null);
+          void refreshExecApprovals();
+        }}
+        onDecided={() => void refreshExecApprovals()}
+      />
+    )}
+    </>
   );
 }

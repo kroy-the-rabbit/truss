@@ -97,6 +97,7 @@ func newStoreWith(t *testing.T, name, kubeconfig string) *contextstore.Store {
 	if err := s.ImportContext(name, name, kubeconfig); err != nil {
 		t.Fatalf("ImportContext: %v", err)
 	}
+	approveStored(t, s, name)
 	return s
 }
 

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/kroy/truss/backend/internal/execconsent"
 	"golang.org/x/crypto/argon2"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -59,6 +60,10 @@ type ContextEntry struct {
 	Name        string `json:"name"`
 	DisplayName string `json:"display_name,omitempty"`
 	Kubeconfig  string `json:"kubeconfig"` // full kubeconfig YAML, current-context set
+	// ApprovedExecFingerprint is the execconsent fingerprint of the exec
+	// plugin / auth-provider / file references the user approved for this
+	// context. Empty means nothing has been approved.
+	ApprovedExecFingerprint string `json:"approved_exec_fingerprint,omitempty"`
 }
 
 type profileData struct {
@@ -75,6 +80,9 @@ type innerData struct {
 	ActiveProfile string                  `json:"active_profile,omitempty"`
 	Contexts      map[string]ContextEntry `json:"contexts,omitempty"`       // v1 legacy
 	ActiveContext string                  `json:"active_context,omitempty"` // v1 legacy
+	// ExecApprovalMigrated records that pre-existing contexts were
+	// grandfathered into exec approval (done once per store).
+	ExecApprovalMigrated bool `json:"exec_approval_migrated,omitempty"`
 }
 
 // encryptedEnvelope is the on-disk JSON wrapper.
@@ -116,6 +124,8 @@ type Store struct {
 	profiles      map[string]profileData
 	activeProfile string
 	rawEnv        *encryptedEnvelope // kept while locked for Unlock()
+
+	execApprovalMigrated bool
 }
 
 // New loads (or starts empty) the encrypted context store.
@@ -178,6 +188,9 @@ func New() (*Store, error) {
 			}
 			s.activeProfile = defaultProfileName
 			return s, nil
+		}
+		if s.migrateExecApprovalsLocked() {
+			_ = s.saveLocked()
 		}
 	case encryptionMethodPassword:
 		// Start locked; caller must call Unlock(password).
@@ -243,6 +256,7 @@ func (s *Store) Reset() error {
 	}
 	s.activeProfile = defaultProfileName
 	s.rawEnv = nil
+	s.execApprovalMigrated = false
 	return nil
 }
 
@@ -617,6 +631,10 @@ func (s *Store) Unlock(password string) error {
 	}
 	s.password = password
 	s.locked = false
+	if s.migrateExecApprovalsLocked() {
+		// Best effort: on failure the grandfathering is retried next unlock.
+		_ = s.saveLocked()
+	}
 	return nil
 }
 
@@ -669,6 +687,7 @@ func (s *Store) Initialize(method, gpgKey, password string) error {
 	s.activeProfile = defaultProfileName
 	s.initialized = true
 	s.locked = false
+	s.execApprovalMigrated = true // nothing to grandfather in a new store
 	return s.saveLocked()
 }
 
@@ -712,9 +731,57 @@ func (s *Store) ImportContext(name, displayName, kubeconfigYAML string) error {
 		Name:        name,
 		DisplayName: displayName,
 		Kubeconfig:  kubeconfigYAML,
+		// Keep any earlier approval: it only takes effect if the new
+		// kubeconfig's fingerprint still matches it.
+		ApprovedExecFingerprint: profile.Contexts[name].ApprovedExecFingerprint,
 	}
 	s.profiles[s.activeProfile] = profile
 	return s.saveLocked()
+}
+
+// SetApprovedExecFingerprint records (or, with "", clears) the approved exec
+// fingerprint for a context in the active profile.
+func (s *Store) SetApprovedExecFingerprint(name, fingerprint string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.initialized || s.locked {
+		return errors.New("store is not ready")
+	}
+	profile := s.ensureActiveProfileLocked()
+	entry, ok := profile.Contexts[name]
+	if !ok {
+		return fmt.Errorf("context %q not found", name)
+	}
+	entry.ApprovedExecFingerprint = fingerprint
+	profile.Contexts[name] = entry
+	s.profiles[s.activeProfile] = profile
+	return s.saveLocked()
+}
+
+// migrateExecApprovalsLocked grandfathers contexts that existed before exec
+// approval was introduced: each one with sensitive auth but no recorded
+// approval gets its current fingerprint recorded. It runs once per store and
+// reports whether the store needs saving. Caller must hold s.mu.Lock().
+func (s *Store) migrateExecApprovalsLocked() bool {
+	if s.execApprovalMigrated {
+		return false
+	}
+	for pname, profile := range s.profiles {
+		for cname, entry := range profile.Contexts {
+			if entry.ApprovedExecFingerprint != "" {
+				continue
+			}
+			fp, err := execconsent.Fingerprint(entry.Kubeconfig)
+			if err != nil || fp == "" {
+				continue
+			}
+			entry.ApprovedExecFingerprint = fp
+			profile.Contexts[cname] = entry
+		}
+		s.profiles[pname] = profile
+	}
+	s.execApprovalMigrated = true
+	return true
 }
 
 // RemoveContext deletes the named context from the store.
@@ -789,6 +856,7 @@ func (s *Store) loadInner(plain []byte) error {
 	}
 
 	s.profiles = inner.Profiles
+	s.execApprovalMigrated = inner.ExecApprovalMigrated
 	s.activeProfile = sanitizeProfileName(inner.ActiveProfile)
 	if s.activeProfile == "" {
 		s.activeProfile = defaultProfileName
@@ -833,8 +901,9 @@ func (s *Store) ensureActiveProfileLocked() profileData {
 func (s *Store) saveLocked() error {
 	s.ensureActiveProfileLocked()
 	inner := innerData{
-		Profiles:      s.profiles,
-		ActiveProfile: s.activeProfile,
+		Profiles:             s.profiles,
+		ActiveProfile:        s.activeProfile,
+		ExecApprovalMigrated: s.execApprovalMigrated,
 	}
 	plain, err := json.Marshal(inner)
 	if err != nil {

@@ -75,6 +75,9 @@ users:
 	if err := s.store.ImportContext("exec", "exec", kc); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.kubeMgr.ApproveExec("exec", mustFingerprint(t, kc)); err != nil {
+		t.Fatal(err)
+	}
 	s.watchCache = newHealthAwareWatchCache(s.kubeMgr)
 	s.discoveryCache = disc.NewCache()
 	return s, func() {

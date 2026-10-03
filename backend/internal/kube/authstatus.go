@@ -31,13 +31,18 @@ const (
 	KindUnreachable                Kind = "UNREACHABLE"
 	KindTLS                        Kind = "TLS"
 	KindUnknown                    Kind = "UNKNOWN"
+	// KindExecApprovalRequired means the context's kubeconfig runs a local
+	// command (exec plugin / auth-provider) or reads local files and the user
+	// has not approved its current configuration. No client is built.
+	KindExecApprovalRequired Kind = "EXEC_APPROVAL_REQUIRED"
 )
 
-// IsAuth reports whether the kind is one of the AUTH_* kinds that trip the
-// per-context circuit breaker.
+// IsAuth reports whether the kind is one of the AUTH_* kinds (or
+// EXEC_APPROVAL_REQUIRED) that trip the per-context circuit breaker.
 func (k Kind) IsAuth() bool {
 	switch k {
-	case KindAuthRequired, KindAuthPluginMissing, KindAuthInteractiveUnsupported, KindAuthRejected:
+	case KindAuthRequired, KindAuthPluginMissing, KindAuthInteractiveUnsupported, KindAuthRejected,
+		KindExecApprovalRequired:
 		return true
 	}
 	return false
@@ -61,6 +66,8 @@ type ContextHealth struct {
 	SuggestedCommand string `json:"suggested_command"`
 	Stderr           string `json:"stderr"`
 	Since            string `json:"since"`
+	// Sensitive is set for EXEC_APPROVAL_REQUIRED: what the context would run.
+	Sensitive *SensitiveAuth `json:"sensitive,omitempty"`
 }
 
 // AuthError is returned while a context's circuit breaker is open. It carries
@@ -291,6 +298,8 @@ func describeKind(contextName string, k Kind) string {
 		return fmt.Sprintf("Cluster for context %q is unreachable", contextName)
 	case KindTLS:
 		return fmt.Sprintf("TLS verification failed for context %q", contextName)
+	case KindExecApprovalRequired:
+		return fmt.Sprintf("Context %q runs a command or reads local files on your computer to authenticate; Truss will not connect until you approve it", contextName)
 	}
 	return fmt.Sprintf("Request failed for context %q", contextName)
 }

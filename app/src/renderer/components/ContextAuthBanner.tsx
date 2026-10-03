@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { QueryClient } from '@tanstack/react-query';
 import {
   type ContextHealth,
   healthKindLabel,
@@ -11,17 +10,12 @@ import {
   recordContextHealth,
   useContextHealth,
 } from '../state/contextHealth';
-import { invalidateHelmViews, invalidateResourceViews } from '../state/queries';
+import { invalidateContextAfterRecovery } from '../state/queries';
+import { ExecApprovalModal, SensitiveAuthDetails } from './ExecApprovalModal';
+
+export { invalidateContextAfterRecovery };
 
 export const AUTO_REAUTH_MIN_INTERVAL_MS = 30_000;
-
-/** Refresh everything that was loaded (or failed) for a context once it is healthy again. */
-export function invalidateContextAfterRecovery(qc: QueryClient, context: string) {
-  invalidateResourceViews(qc, { context });
-  invalidateHelmViews(qc, { context });
-  qc.invalidateQueries({ queryKey: ['resourceKinds', context] });
-  qc.invalidateQueries({ queryKey: ['contextPreflight', context] });
-}
 
 function authHint(health: ContextHealth, plugin: string): string {
   const p = plugin ? `\`${plugin}\`` : 'the credential plugin';
@@ -64,8 +58,11 @@ export function ContextAuthBanner({ context }: { context: string }) {
   const lastAutoReauthRef = useRef(0);
   const copiedTimerRef = useRef<number | null>(null);
 
+  const [reviewOpen, setReviewOpen] = useState(false);
+
   const authBlocked = isAuthBlocked(health);
   const connectivity = isConnectivityError(health);
+  const needsApproval = authBlocked && health?.kind === 'EXEC_APPROVAL_REQUIRED';
 
   const retry = useCallback(async () => {
     if (!context) return;
@@ -87,7 +84,8 @@ export function ContextAuthBanner({ context }: { context: string }) {
 
   // Returning to the window after signing in elsewhere: re-probe, throttled.
   useEffect(() => {
-    if (!authBlocked) return;
+    // Approval is a user decision; re-probing on focus cannot resolve it.
+    if (!authBlocked || needsApproval) return;
     const onFocus = () => {
       const now = Date.now();
       if (now - lastAutoReauthRef.current < AUTO_REAUTH_MIN_INTERVAL_MS) return;
@@ -96,7 +94,7 @@ export function ContextAuthBanner({ context }: { context: string }) {
     };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [authBlocked, retry]);
+  }, [authBlocked, needsApproval, retry]);
 
   useEffect(() => () => {
     if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
@@ -105,11 +103,53 @@ export function ContextAuthBanner({ context }: { context: string }) {
   useEffect(() => {
     setRetryError('');
     setCopied(false);
+    setReviewOpen(false);
   }, [context]);
 
   if (!health || (!authBlocked && !connectivity)) return null;
 
   const details = [health.message, health.stderr].filter((s) => !!s && s.trim()).join('\n\n');
+
+  if (needsApproval) {
+    const sensitive = health.sensitive;
+    return (
+      <div className="context-auth-banner" role="alert" aria-live="assertive" data-kind={health.kind}>
+        <div className="context-auth-banner-row">
+          <span className="context-auth-banner-icon" aria-hidden="true">!</span>
+          <div className="context-auth-banner-body">
+            <div className="context-auth-banner-title">Approval required for {context}</div>
+            <div className="context-auth-banner-summary">
+              This context authenticates by running a command or reading files on your computer. Truss will not
+              connect until you review and approve it.
+            </div>
+            {sensitive?.exec && (
+              <div className="context-auth-banner-command">
+                <code aria-label="Command to approve">{sensitive.exec.command_line}</code>
+              </div>
+            )}
+            {sensitive && (
+              <details className="context-auth-banner-details">
+                <summary>Details</summary>
+                <SensitiveAuthDetails sensitive={sensitive} />
+              </details>
+            )}
+          </div>
+          <div className="context-auth-banner-actions">
+            <button
+              className="context-auth-btn context-auth-btn-primary"
+              onClick={() => setReviewOpen(true)}
+              disabled={!sensitive}
+            >
+              Review &amp; approve
+            </button>
+          </div>
+        </div>
+        {reviewOpen && sensitive && (
+          <ExecApprovalModal items={[{ name: context, sensitive }]} onClose={() => setReviewOpen(false)} />
+        )}
+      </div>
+    );
+  }
 
   if (connectivity) {
     return (

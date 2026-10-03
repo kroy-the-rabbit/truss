@@ -95,6 +95,14 @@ export function invalidateHelmViews(queryClient: QueryInvalidator, opts: { conte
   });
 }
 
+/** Refresh everything that was loaded (or failed) for a context once it is healthy again. */
+export function invalidateContextAfterRecovery(qc: QueryClient, context: string) {
+  invalidateResourceViews(qc, { context });
+  invalidateHelmViews(qc, { context });
+  qc.invalidateQueries({ queryKey: ['resourceKinds', context] });
+  qc.invalidateQueries({ queryKey: ['contextPreflight', context] });
+}
+
 export function usePing() {
   return useQuery({
     queryKey: ['ping'],
