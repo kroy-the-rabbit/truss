@@ -44,8 +44,11 @@ func newSetupServer(t *testing.T) *Server {
 	}
 }
 
+// testMainToken is the main-process-only token test servers are given.
+const testMainToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 // pluginStorageReq builds a plugin secure-storage request carrying the
-// main-process-only storage token.
+// main-process-only token.
 func pluginStorageReq(method, target string, body io.Reader) *http.Request {
 	req := httptest.NewRequest(method, target, body)
 	req.Header.Set(MainTokenHeader, testMainToken)

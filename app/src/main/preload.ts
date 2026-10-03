@@ -25,7 +25,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setExecPathHints: (pathHints: string[]) => ipcRenderer.invoke('set-exec-path-hints', pathHints),
   setEventSuppressionRules: (rules: string[]) => ipcRenderer.invoke('set-event-suppression-rules', rules),
   setThemeMode: (mode: 'system' | 'light' | 'dark' | 'user-css') => ipcRenderer.invoke('set-theme-mode', mode),
-  openExternalTerminal: (opts: Record<string, unknown>) => ipcRenderer.invoke('open-external-terminal', opts),
   openSessionWindow: (opts: { kind: 'logs' | 'exec'; context: string; namespace: string; pod: string; container: string }) =>
     ipcRenderer.invoke('open-session-window', opts),
   openPortForwardWindow: (opts?: {

@@ -128,7 +128,6 @@ func (s *Server) newMux(token string) *http.ServeMux {
 	mux.HandleFunc("/api/contexts/approve-exec", s.handleContextApproveExec)
 	mux.HandleFunc("/api/contexts/revoke-exec", s.handleContextRevokeExec)
 	mux.HandleFunc("/api/contexts/exec-approvals", s.handleContextExecApprovals)
-	mux.HandleFunc("/api/contexts/export-kubeconfig", s.requireMainToken(s.handleExportKubeconfig))
 	mux.HandleFunc("/api/setup/reset", s.handleSetupReset)
 	mux.HandleFunc("/api/gpg-keys", s.handleGPGKeys)
 	mux.HandleFunc("/api/kubeconfig-contexts", s.handleKubeconfigContexts)

@@ -97,7 +97,6 @@ export async function installElectronApiMock(page: Page) {
       onSessionEvent: () => noopUnsub,
       setThemeMode: async () => undefined,
       setExecPathHints: async () => undefined,
-      openExternalTerminal: async () => ({ ok: true }),
       localFsList: async () => [],
       localFsHome: async () => '/tmp',
       localFsSave: async () => undefined,

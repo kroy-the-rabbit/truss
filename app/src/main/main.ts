@@ -1,5 +1,4 @@
 import { app, BrowserWindow, crashReporter, dialog, ipcMain, Menu, nativeTheme, powerMonitor, session, shell, clipboard } from 'electron';
-import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -31,7 +30,6 @@ import { PortForwardSupervisor } from './portForwardSupervisor';
 import { createDaemonPortForwardApi } from './portForwardApi';
 import { ApprovedRoots, assertInsideApprovedRoot } from './pathSafety';
 import { assertTrustedSender, installSecurityGuards } from './security';
-import { KubeconfigFiles, openExternalTerminal, TerminalCandidate } from './externalTerminal';
 
 let mainWindow: BrowserWindow | null = null;
 let logsWindow: BrowserWindow | null = null;
@@ -74,19 +72,6 @@ const portForwards = new PortForwardSupervisor({
 });
 let sessionLocked = false;
 
-// Temporary vault-scoped kubeconfigs handed to external terminals.
-let terminalKubeconfigs: KubeconfigFiles | null = null;
-function getTerminalKubeconfigs(): KubeconfigFiles {
-  if (!terminalKubeconfigs) {
-    terminalKubeconfigs = new KubeconfigFiles({
-      platform: process.platform,
-      env: process.env,
-      tempDir: app.getPath('temp'),
-      uid: typeof process.getuid === 'function' ? process.getuid() : 0,
-    });
-  }
-  return terminalKubeconfigs;
-}
 
 // Minimize persistent Chromium artifacts on disk.
 app.commandLine.appendSwitch('disable-http-cache');
@@ -536,7 +521,6 @@ function broadcastSessionEvent(type: string) {
 ipcMain.handle('session-broadcast', (_event, type: string) => {
   if (type === 'locked') {
     sessionLocked = true;
-    terminalKubeconfigs?.cleanupAll();
     portForwards.lock();
   } else if (type === 'unlocked') {
     sessionLocked = false;
@@ -971,37 +955,6 @@ ipcMain.handle('set-theme-mode', (_event, mode: unknown, tone?: unknown) => {
     userCssPath: getUserCssPath(),
   };
 });
-
-// Handle "open in system terminal" requests. The terminal gets a private,
-// vault-scoped temporary kubeconfig (see externalTerminal.ts); a terminal
-// opened earlier loses cluster access after the vault locks or Truss quits,
-// because those files are deleted then (intended).
-ipcMain.handle('open-external-terminal', async (event, opts: unknown) => {
-  assertTrustedSender(event);
-  return openExternalTerminal(opts, {
-    platform: process.platform,
-    env: process.env,
-    isLocked: () => sessionLocked,
-    getAccess: getDaemonMainAccess,
-    files: getTerminalKubeconfigs(),
-    launch: trySpawnTerminal,
-  });
-});
-
-function trySpawnTerminal(terminals: TerminalCandidate[]) {
-  if (terminals.length === 0) return;
-  const [first, ...rest] = terminals;
-  const proc = spawn(first.cmd, first.args, {
-    detached: true,
-    stdio: 'ignore',
-    env: first.env,
-    windowsVerbatimArguments: first.windowsVerbatimArguments,
-  });
-  proc.on('error', () => {
-    trySpawnTerminal(rest);
-  });
-  proc.unref();
-}
 
 // --- Plugin IPC handlers ---
 
@@ -1554,7 +1507,6 @@ app.whenReady().then(async () => {
   });
   wipeTransientUserDataDirs();
   await wipeTransientSessionData();
-  getTerminalKubeconfigs().sweepStale();
 
   ensureUserCssTemplate();
   loadPreferences();
@@ -1633,7 +1585,6 @@ app.on('before-quit', () => {
   portForwardWindow = null;
   portForwards.shutdown();
   trustedFileTransferSenders.clear();
-  terminalKubeconfigs?.cleanupAll();
   wipeTransientUserDataDirs();
   void wipeTransientSessionData();
   stopDaemon();
