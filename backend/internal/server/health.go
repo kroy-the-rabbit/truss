@@ -136,6 +136,10 @@ func (s *Server) handleContextReauth(w http.ResponseWriter, r *http.Request) {
 	health := s.kubeMgr.Reauth(name)
 	if health.State == kube.StateOK {
 		s.triggerSearchIndexRefresh(name)
+		// Watch clients stay subscribed across the restart and get a resync.
+		if s.watchCache != nil {
+			s.restartWatchedInformers(name)
+		}
 	}
 	writeJSON(w, http.StatusOK, health)
 }

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,7 +19,19 @@ import (
 // version is set at build time via -ldflags="-X main.version=<tag>"
 var version = "dev"
 
+// watchStdinEOF reads r until EOF or a read error, then calls onEOF. With
+// --exit-on-stdin-eof the parent (Electron) holds our stdin pipe open; when
+// the parent dies the pipe closes and the daemon shuts down instead of being
+// orphaned.
+func watchStdinEOF(r io.Reader, onEOF func()) {
+	_, _ = io.Copy(io.Discard, r)
+	onEOF()
+}
+
 func main() {
+	exitOnStdinEOF := flag.Bool("exit-on-stdin-eof", false, "shut down gracefully when stdin reaches EOF (parent process exited)")
+	flag.Parse()
+
 	// Generate or use provided auth token.
 	token := os.Getenv("TRUSS_TOKEN")
 	if token == "" {
@@ -51,10 +65,18 @@ func main() {
 	fmt.Printf("TRUSS_PORT=%d\n", port)
 	fmt.Printf("TRUSS_TOKEN=%s\n", token)
 
-	// Wait for termination signal.
+	// Wait for a termination signal (or stdin EOF when requested).
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	stdinEOF := make(chan struct{})
+	if *exitOnStdinEOF {
+		go watchStdinEOF(os.Stdin, func() { close(stdinEOF) })
+	}
+	select {
+	case <-sigCh:
+	case <-stdinEOF:
+		fmt.Fprintln(os.Stderr, "stdin closed; parent exited")
+	}
 	fmt.Println("shutting down")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -183,6 +183,9 @@ func (s *Server) Start(token string) (int, error) {
 		}()
 	}
 
+	// Stop informers for unwatched, idle, non-active contexts (never the active one).
+	s.watchCache.StartJanitor(func(name string) bool { return name == s.kubeMgr.ActiveContext() })
+
 	httpServer := &http.Server{Handler: h2cHandler}
 	s.lifecycleMu.Lock()
 	s.httpServer = httpServer
@@ -206,7 +209,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.listener = nil
 	s.lifecycleMu.Unlock()
 
-	s.watchCache.StopAll()
+	s.watchCache.Close()
 
 	if httpServer == nil {
 		return nil
@@ -223,6 +226,22 @@ func (s *Server) resolveContext(ctx string) string {
 		return s.kubeMgr.ActiveContext()
 	}
 	return ctx
+}
+
+// restartWatchedInformers restarts informers in the background for a context
+// that still has /ws/watch subscribers after an Invalidate, so they receive a
+// resync and keep streaming.
+func (s *Server) restartWatchedInformers(ctxName string) {
+	if s.watchCache.SubscriberCount(ctxName) == 0 {
+		return
+	}
+	go func() {
+		cs, err := s.kubeMgr.GetClientSet(ctxName)
+		if err != nil {
+			return
+		}
+		s.ensureWatchCache(ctxName, cs)
+	}()
 }
 
 // ensureWatchCache discovers GVRs and starts informers for a context. Idempotent.
@@ -1456,12 +1475,12 @@ func (s *Server) handleWatchWS(_ string) http.HandlerFunc {
 		// Best-effort ensure informers are running for this context.
 		s.ensureWatchCache(ctxName, cs)
 
-		ch, cancel, ok := s.watchCache.Subscribe(ctxName)
+		sub, ok := s.watchCache.Subscribe(ctxName)
 		if !ok {
 			http.Error(w, "watch cache unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		defer cancel()
+		defer sub.Cancel()
 
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 			InsecureSkipVerify: true,
@@ -1473,56 +1492,102 @@ func (s *Server) handleWatchWS(_ string) http.HandlerFunc {
 		}
 		defer conn.Close(websocket.StatusNormalClosure, "")
 
-		healthCh, healthCancel := s.kubeMgr.SubscribeHealth()
-		defer healthCancel()
+		s.serveWatchStream(r.Context(), conn, ctxName, nsFilter, sub)
+	}
+}
 
-		wsCtx := r.Context()
-		ping := time.NewTicker(20 * time.Second)
-		defer ping.Stop()
+// watchPingInterval is how often /ws/watch sends keepalive pings.
+var watchPingInterval = 20 * time.Second
 
-		type watchMsg struct {
-			Type string `json:"type"`
-			watchcache.ResourceEvent
+// serveWatchStream pumps watch-cache events, health transitions and resync
+// requests to a /ws/watch client until the client disconnects or the
+// subscription ends.
+//
+// Message types: {"type":"resource",...}, {"type":"health","health":{...}},
+// {"type":"ping"} and {"type":"resync","reason":string}. A resync means
+// events may have been dropped and the client must do a full refetch; it is
+// sent after a subscriber buffer overflow (once the backlog drains), after
+// the context's informers are recreated, and when the context recovers from
+// an error state.
+func (s *Server) serveWatchStream(ctx context.Context, conn *websocket.Conn, ctxName, nsFilter string, sub *watchcache.Subscription) {
+	// The client never sends data; CloseRead reads (and handles) control
+	// frames so a client disconnect cancels wsCtx immediately rather than on
+	// the next failed write.
+	wsCtx := conn.CloseRead(ctx)
+
+	healthCh, healthCancel := s.kubeMgr.SubscribeHealth()
+	defer healthCancel()
+	lastState := s.kubeMgr.Health(ctxName).State
+
+	ping := time.NewTicker(watchPingInterval)
+	defer ping.Stop()
+
+	type watchMsg struct {
+		Type string `json:"type"`
+		watchcache.ResourceEvent
+	}
+
+	flushResync := func() bool {
+		reason, ok := sub.TakeResync()
+		if !ok {
+			return true
 		}
+		msg, _ := json.Marshal(struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		}{Type: "resync", Reason: reason})
+		return conn.Write(wsCtx, websocket.MessageText, msg) == nil
+	}
 
-		for {
-			select {
-			case <-wsCtx.Done():
+	events := sub.Events()
+	for {
+		select {
+		case <-wsCtx.Done():
+			return
+		case <-ping.C:
+			if err := conn.Write(wsCtx, websocket.MessageText, []byte(`{"type":"ping"}`)); err != nil {
 				return
-			case <-ping.C:
-				if err := conn.Write(wsCtx, websocket.MessageText, []byte(`{"type":"ping"}`)); err != nil {
-					return
-				}
-			case h, ok := <-healthCh:
-				if !ok {
-					return
-				}
-				if h.Context != ctxName {
-					continue
-				}
-				if err := conn.Write(wsCtx, websocket.MessageText, healthWatchMessage(h)); err != nil {
-					return
-				}
-			case ev, ok := <-ch:
-				if !ok {
-					return
-				}
-				if nsFilter != "" && ev.Namespace != "" && ev.Namespace != nsFilter {
-					continue
-				}
-				if nsFilter != "" && ev.Namespace == "" {
-					// Keep cluster-scoped changes because they affect overview/counts.
-				}
+			}
+		case <-sub.ResyncPending():
+			if !flushResync() {
+				return
+			}
+		case h, ok := <-healthCh:
+			if !ok {
+				return
+			}
+			if h.Context != ctxName {
+				continue
+			}
+			recovered := lastState == kube.StateError && h.State == kube.StateOK
+			lastState = h.State
+			if err := conn.Write(wsCtx, websocket.MessageText, healthWatchMessage(h)); err != nil {
+				return
+			}
+			if recovered {
+				// Informers may have missed events while the watch was failing.
+				sub.MarkResync(watchcache.ResyncReasonRecovered)
+			}
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			if nsFilter == "" || ev.Namespace == "" || ev.Namespace == nsFilter {
+				// Cluster-scoped changes are kept under a namespace filter
+				// because they affect overview/counts.
 				msg, err := json.Marshal(watchMsg{
 					Type:          "resource",
 					ResourceEvent: ev,
 				})
-				if err != nil {
-					continue
+				if err == nil {
+					if err := conn.Write(wsCtx, websocket.MessageText, msg); err != nil {
+						return
+					}
 				}
-				if err := conn.Write(wsCtx, websocket.MessageText, msg); err != nil {
-					return
-				}
+			}
+			// Coalesced overflow resync goes out once the backlog drains.
+			if !flushResync() {
+				return
 			}
 		}
 	}
@@ -2562,6 +2627,7 @@ func (s *Server) handleContextsImport(w http.ResponseWriter, r *http.Request) {
 	// Invalidate any cached client and watch cache so the new kubeconfig takes effect.
 	s.kubeMgr.InvalidateClient(body.Name)
 	s.watchCache.Invalidate(body.Name)
+	s.restartWatchedInformers(body.Name)
 	// Ensure an active context is set.
 	if s.kubeMgr.ActiveContext() == "" {
 		_ = s.kubeMgr.SetActiveContext(body.Name)
@@ -2591,7 +2657,7 @@ func (s *Server) handleContextsDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.kubeMgr.InvalidateClient(body.Name)
-	s.watchCache.Invalidate(body.Name)
+	s.watchCache.Remove(body.Name)
 	if s.kubeMgr.ActiveContext() == body.Name {
 		if next := s.store.LastActiveContext(); next != "" {
 			_ = s.kubeMgr.SetActiveContext(next)
