@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useEffect, useCallback, useState, useRef, Component, ErrorInfo, ReactNode } from 'react';
-import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
+import { QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import { TopBar } from './components/TopBar';
 import { Breadcrumb } from './components/Breadcrumb';
 import { TreeSidebar } from './panes/TreeSidebar';
@@ -17,6 +17,8 @@ import { pluginRegistry } from './plugins';
 import { useLiveResourceInvalidation } from './hooks/useLiveResourceInvalidation';
 import { useReadOnlySync } from './state/readOnlySync';
 import { ToastContainer } from './components/ToastContainer';
+import { createAppQueryClient } from './state/queryClient';
+import { ContextAuthBanner } from './components/ContextAuthBanner';
 import './styles.css';
 
 const MetricsDashboard = lazy(async () => {
@@ -45,14 +47,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 10000,
-      retry: 2,
-    },
-  },
-});
+const queryClient = createAppQueryClient();
 
 function AppLayout() {
   const {
@@ -787,6 +782,7 @@ function AppLayout() {
   return (
     <div className="app">
       <TopBar />
+      <ContextAuthBanner context={activeContext} />
       <Breadcrumb />
       <div
         className="split-pane"

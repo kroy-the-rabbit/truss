@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useState, useEffect, useRef, useCallback } from 'react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { LogsTab } from './components/LogsTab';
 import { ExecTab } from './components/ExecTab';
 import type { LogsTabSaveState } from './components/LogsTab';
@@ -7,6 +7,8 @@ import type { ExecTabSaveState } from './components/ExecTab';
 import { FileTransfer } from './components/FileTransfer';
 import { PortForwardManager } from './components/PortForwardManager';
 import { useSessionEvent } from './hooks/useSessionEvent';
+import { createAppQueryClient } from './state/queryClient';
+import { ContextAuthBanner } from './components/ContextAuthBanner';
 import './styles.css';
 
 const YamlDiffWindow = lazy(async () => {
@@ -14,14 +16,7 @@ const YamlDiffWindow = lazy(async () => {
   return { default: m.YamlDiffWindow };
 });
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 10000,
-      retry: 2,
-    },
-  },
-});
+const queryClient = createAppQueryClient();
 
 interface SessionTab {
   id: string;
@@ -167,10 +162,13 @@ function SessionContent() {
     });
   };
 
+  const activeTabContext = (tabs.find((t) => t.id === activeId) ?? tabs[0])?.context || '';
+
   // File transfer is a single-pane window (no tabs).
   if (kind === 'files') {
     return (
       <div className="session-window">
+        <ContextAuthBanner context={firstTab.context} />
         <div style={{ position: 'relative', flex: 1 }}>
           <FileTransfer
             context={firstTab.context}
@@ -218,6 +216,7 @@ function SessionContent() {
 
   return (
     <div className="session-window">
+      <ContextAuthBanner context={activeTabContext} />
       <div className="session-tab-bar">
         <span className="session-kind-label">{kind === 'logs' ? 'Logs' : 'Exec'}</span>
         {tabs.map((tab) => (

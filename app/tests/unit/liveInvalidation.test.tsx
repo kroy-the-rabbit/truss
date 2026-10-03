@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { useLiveResourceInvalidation } from '../../src/renderer/hooks/useLiveResourceInvalidation';
 import { useAppStore } from '../../src/renderer/state/store';
 import { resetAppStore } from './storeTestUtils';
+import { useContextHealthStore } from '../../src/renderer/state/contextHealth';
 
 class MockWebSocket {
   static CONNECTING = 0;
@@ -99,5 +100,101 @@ describe('useLiveResourceInvalidation idle refresh', () => {
     expect(queryClient.getQueryState(helmKey)?.isInvalidated).toBe(true);
     expect(queryClient.getQueryState(otherContextKey)?.isInvalidated).toBe(false);
     expect(socket.close).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not open the watch socket while the context needs sign-in, reconnects once healthy', async () => {
+    useContextHealthStore.getState().clear();
+    useAppStore.getState().setActiveContext('ctx-a');
+    useContextHealthStore.getState().setHealth({ context: 'ctx-a', state: 'error', kind: 'AUTH_REQUIRED' });
+    const resourcesKey = ['resources', 'ctx-a', 'default', '', 'v1', 'pods', ''];
+    queryClient.setQueryData(resourcesKey, { items: [] });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Harness />
+      </QueryClientProvider>,
+    );
+    await act(async () => {
+      await Promise.resolve();
+      vi.advanceTimersByTime(30_000);
+      await Promise.resolve();
+    });
+    expect(MockWebSocket.instances).toHaveLength(0);
+    expect(useAppStore.getState().liveUpdatesConnected).toBe(false);
+
+    await act(async () => {
+      useContextHealthStore.getState().setHealth({ context: 'ctx-a', state: 'ok', kind: '' });
+      await Promise.resolve();
+    });
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(queryClient.getQueryState(resourcesKey)?.isInvalidated).toBe(true);
+    useContextHealthStore.getState().clear();
+  });
+
+  test('a rejected upgrade checks context health and stops reconnecting on AUTH_*', async () => {
+    useContextHealthStore.getState().clear();
+    useAppStore.getState().setActiveContext('ctx-a');
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      context: 'ctx-a', state: 'error', kind: 'AUTH_REQUIRED', suggested_command: 'gcloud auth login',
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Harness />
+      </QueryClientProvider>,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(MockWebSocket.instances).toHaveLength(1);
+
+    // Server rejects the upgrade with 401: the browser only sees a close before open.
+    await act(async () => {
+      MockWebSocket.instances[0].close();
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/context-health?context=ctx-a');
+    expect(useContextHealthStore.getState().byContext['ctx-a']?.kind).toBe('AUTH_REQUIRED');
+
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+      await Promise.resolve();
+    });
+    expect(MockWebSocket.instances).toHaveLength(1);
+
+    vi.unstubAllGlobals();
+    useContextHealthStore.getState().clear();
+  });
+
+  test('a health message on an open socket updates the store and closes the socket', async () => {
+    useContextHealthStore.getState().clear();
+    useAppStore.getState().setActiveContext('ctx-a');
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Harness />
+      </QueryClientProvider>,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const socket = MockWebSocket.instances[0];
+    await act(async () => {
+      socket.readyState = MockWebSocket.OPEN;
+      socket.onopen?.(new Event('open'));
+      socket.onmessage?.(new MessageEvent('message', {
+        data: JSON.stringify({ type: 'health', health: { context: 'ctx-a', state: 'error', kind: 'AUTH_REJECTED' } }),
+      }));
+      await Promise.resolve();
+    });
+    expect(useContextHealthStore.getState().byContext['ctx-a']?.kind).toBe('AUTH_REJECTED');
+    expect(socket.close).toHaveBeenCalled();
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+      await Promise.resolve();
+    });
+    expect(MockWebSocket.instances).toHaveLength(1);
+    useContextHealthStore.getState().clear();
   });
 });

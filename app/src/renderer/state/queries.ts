@@ -14,10 +14,22 @@ import type { GVR } from '../api/gen/truss/v1/resources_pb';
 import { useAppStore } from './store';
 import { friendlyErrorMessage } from '../api/readOnlyErrors';
 
+/** Raised when a context does not answer in time (often an exec plugin waiting on a browser login). */
+export class ContextTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ContextTimeoutError';
+  }
+}
+
+export function isContextTimeoutError(err: unknown): boolean {
+  return err instanceof ContextTimeoutError;
+}
+
 async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
   const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(() => reject(new Error(message)), ms);
+    timeoutHandle = setTimeout(() => reject(new ContextTimeoutError(message)), ms);
   });
   try {
     return await Promise.race([promise, timeoutPromise]);

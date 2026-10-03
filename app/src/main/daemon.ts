@@ -2,6 +2,7 @@ import { ChildProcess, spawn } from 'child_process';
 import path from 'path';
 import { app } from 'electron';
 import http from 'http';
+import { getLoginShellEnv, mergeShellEnv } from './shellEnv';
 
 export interface DaemonConfig {
   port: number;
@@ -69,15 +70,18 @@ export function enrichPath(pathHints: string[] = []): string {
 
 export async function startDaemon(opts?: StartDaemonOptions): Promise<DaemonConfig> {
   const binary = findDaemonBinary();
+  const shellEnv = await getLoginShellEnv();
 
   return new Promise((resolve, reject) => {
     let settled = false;
     let startupTimer: NodeJS.Timeout | null = null;
     let startupProcess: ChildProcess | null = null;
-    const env = {
-      ...process.env,
-      PATH: enrichPath(opts?.pathHints || []),
-    };
+    const env = mergeShellEnv(
+      process.env,
+      shellEnv,
+      enrichPath(opts?.pathHints || []),
+      process.platform === 'win32' ? ';' : ':',
+    );
 
     const child = spawn(binary, [], {
       env,

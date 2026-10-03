@@ -1,6 +1,13 @@
 import { useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAppStore } from '../state/store';
+import {
+  type ContextHealth,
+  fetchContextHealth,
+  isAuthBlocked,
+  recordContextHealth,
+  useContextHealthStore,
+} from '../state/contextHealth';
 
 type WatchMessage = {
   type?: string;
@@ -10,6 +17,7 @@ type WatchMessage = {
   namespace?: string;
   name?: string;
   verb?: string;
+  health?: ContextHealth;
 };
 
 const RECONNECT_MS = 2000;
@@ -75,6 +83,10 @@ export function useLiveResourceInvalidation() {
   const selectedKindLabelRef = useRef(selectedKindLabel);
   const selectedKindRef = useRef(selectedKind);
   const lastWatchMessageAtRef = useRef(0);
+  // While the active context needs sign-in, keep the socket down instead of
+  // re-running the exec plugin every RECONNECT_MS. Reconnect once it clears.
+  const authBlocked = useContextHealthStore((s) => isAuthBlocked(s.byContext[activeContext]));
+  const wasAuthBlockedRef = useRef(false);
 
   useEffect(() => {
     selectedResourceRef.current = selectedResource;
@@ -88,6 +100,13 @@ export function useLiveResourceInvalidation() {
       setLiveUpdatesConnected(false);
       return;
     }
+    if (authBlocked) {
+      wasAuthBlockedRef.current = true;
+      setLiveUpdatesConnected(false);
+      return;
+    }
+    const recoveredFromAuth = wasAuthBlockedRef.current;
+    wasAuthBlockedRef.current = false;
 
     let cancelled = false;
     let ws: WebSocket | null = null;
@@ -285,6 +304,7 @@ export function useLiveResourceInvalidation() {
         );
         ws = nextWs;
         let lastMessageAt = Date.now();
+        let opened = false;
         lastWatchMessageAtRef.current = lastMessageAt;
 
         if (heartbeatTimerRef.current !== null) {
@@ -293,6 +313,7 @@ export function useLiveResourceInvalidation() {
         }
 
         nextWs.onopen = () => {
+          opened = true;
           if (!cancelled) {
             lastMessageAt = Date.now();
             lastWatchMessageAtRef.current = lastMessageAt;
@@ -314,6 +335,11 @@ export function useLiveResourceInvalidation() {
           try {
             msg = JSON.parse(String(evt.data));
           } catch {
+            return;
+          }
+          if (msg && msg.type === 'health' && msg.health) {
+            const h = msg.health;
+            recordContextHealth({ ...h, context: h.context || activeContext }, qc);
             return;
           }
           if (!msg || msg.type !== 'resource') return;
@@ -406,20 +432,45 @@ export function useLiveResourceInvalidation() {
             heartbeatTimerRef.current = null;
           }
           if (cancelled) return;
-          reconnectTimerRef.current = window.setTimeout(() => {
-            void connect();
-          }, RECONNECT_MS);
+          if (!opened) {
+            // The upgrade was rejected (e.g. HTTP 401 when the context needs
+            // sign-in); browsers hide the status, so ask the daemon why.
+            void checkHealthThenReconnect();
+            return;
+          }
+          scheduleReconnect();
         };
       } catch {
         setLiveUpdatesConnected(false);
-        if (!cancelled) {
-          reconnectTimerRef.current = window.setTimeout(() => {
-            void connect();
-          }, RECONNECT_MS);
-        }
+        scheduleReconnect();
       }
     };
 
+    const scheduleReconnect = () => {
+      if (cancelled) return;
+      if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        void connect();
+      }, RECONNECT_MS);
+    };
+
+    const checkHealthThenReconnect = async () => {
+      try {
+        const health = await fetchContextHealth(activeContext);
+        if (cancelled) return;
+        recordContextHealth(health, qc);
+        // Recording an AUTH_* state re-runs this effect, which stays offline.
+        if (isAuthBlocked(health)) return;
+      } catch {
+        // Health endpoint unavailable — fall back to plain reconnect.
+      }
+      scheduleReconnect();
+    };
+
+    if (recoveredFromAuth) {
+      invalidateActiveContextQueries();
+    }
     void connect();
 
     let lastForegroundRefetchAt = 0;
@@ -448,5 +499,5 @@ export function useLiveResourceInvalidation() {
         ws.close();
       }
     };
-  }, [qc, activeContext, activeNamespace, setLiveUpdatesConnected]);
+  }, [qc, activeContext, activeNamespace, setLiveUpdatesConnected, authBlocked]);
 }

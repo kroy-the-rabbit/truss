@@ -16,6 +16,7 @@ import { MetricsLineChart } from './MetricsLineChart';
 import { GVR } from '../api/gen/truss/v1/resources_pb';
 import type { Resource } from '../api/gen/truss/v1/resources_pb';
 import type { GetClusterOverviewResponse } from '../api/gen/truss/v1/overview_pb';
+import { describeQueryError } from '../lib/connectErrors';
 
 // PromQL queries
 const CPU_RANGE_QUERY = `sum(rate(container_cpu_usage_seconds_total{container!="",container!="POD"}[5m]))`;
@@ -1051,13 +1052,22 @@ export function MetricsDashboard() {
       )}
 
       {/* Tab content */}
-      {tab === 'overview' && (
+      {tab !== 'prometheus' && overview.isError && (
+        <div className="metrics-error-state" role="alert">
+          <div className="metrics-error-state-title">Cluster overview unavailable</div>
+          <div>{describeQueryError(overview.error)}</div>
+          <button className="context-auth-btn" onClick={() => void overview.refetch()} disabled={overview.isFetching}>
+            {overview.isFetching ? 'Retrying…' : 'Retry'}
+          </button>
+        </div>
+      )}
+      {!overview.isError && tab === 'overview' && (
         <OverviewTab overview={overview.data} navToPod={navToPod} navToResource={navToResource} />
       )}
-      {tab === 'nodes' && (
+      {!overview.isError && tab === 'nodes' && (
         <NodesTab overview={overview.data} activeContext={activeContext} navToPod={navToPod} />
       )}
-      {tab === 'workloads' && (
+      {!overview.isError && tab === 'workloads' && (
         <WorkloadsTab overview={overview.data} />
       )}
       {tab === 'prometheus' && (

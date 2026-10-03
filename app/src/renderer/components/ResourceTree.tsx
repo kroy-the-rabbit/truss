@@ -4,12 +4,7 @@ import { useResourceKinds, useResourceCounts } from '../state/queries';
 import { GVR } from '../api/gen/truss/v1/resources_pb';
 import { useTreeSections } from '../plugins/hooks';
 import { createPluginAPI } from '../plugins/api';
-
-function isRbacDeniedError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err ?? '');
-  const lower = msg.toLowerCase();
-  return lower.includes('forbidden') || lower.includes('permission denied') || lower.includes('rbac');
-}
+import { isAuthError, isRbacDeniedError } from '../lib/connectErrors';
 
 export function ResourceTree() {
   const { activeContext, activeNamespace, setSelectedKind, selectedKindLabel, activePane, setActivePane } = useAppStore();
@@ -254,6 +249,11 @@ export function ResourceTree() {
         {denied && (
           <div style={{ marginTop: 8, opacity: 0.8 }}>
             Your current credentials may not be allowed to query Kubernetes discovery APIs.
+          </div>
+        )}
+        {isAuthError(resourceKinds.error) && (
+          <div style={{ marginTop: 8, opacity: 0.8 }}>
+            Sign-in required for this cluster. See the banner above.
           </div>
         )}
       </div>

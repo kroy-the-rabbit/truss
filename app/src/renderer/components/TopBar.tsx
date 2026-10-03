@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useAppStore } from '../state/store';
-import { useContexts, useSetActiveContext, useNamespaces, usePing, useProfiles, useSetActiveProfile, useContextPreflight } from '../state/queries';
+import { useContexts, useSetActiveContext, useNamespaces, usePing, useProfiles, useSetActiveProfile, useContextPreflight, isContextTimeoutError } from '../state/queries';
+import { useContextHealth, healthKindLabel } from '../state/contextHealth';
 import { ContextManager } from './ContextManager';
 import { PluginManager } from '../plugins/PluginManager';
 
@@ -29,13 +30,23 @@ export function TopBar() {
   const namespaces = useNamespaces(activeContext);
   const preflight = useContextPreflight(activeContext);
   const daemonConnected = ping.isSuccess;
-  const contextUnreachable = !!activeContext && daemonConnected && namespaces.isError;
+  const health = useContextHealth(activeContext);
+  const healthError = health?.state === 'error' ? health : null;
+  const contextUnreachable = !!activeContext && daemonConnected && (namespaces.isError || !!healthError);
   const contextChecking = !!activeContext && daemonConnected && namespaces.isFetching && !namespaces.isError;
   const contextSlow = contextChecking && contextCheckDelayed;
   const missingExecHelper = !!activeContext && daemonConnected && preflight.data?.missing_exec_helper;
   const missingExecCommand = preflight.data?.exec_command || '';
   const contextErrorDetail =
-    namespaces.error instanceof Error ? namespaces.error.message : 'Failed to reach the selected context';
+    healthError?.message ||
+    (namespaces.error instanceof Error ? namespaces.error.message : 'Failed to reach the selected context');
+  const waitingForExecPlugin =
+    !healthError && namespaces.isError && isContextTimeoutError(namespaces.error) && !!preflight.data?.has_exec_auth;
+  const contextAlertText = healthError
+    ? healthKindLabel(healthError.kind)
+    : waitingForExecPlugin
+      ? 'Waiting for auth plugin (browser login?)'
+      : 'Context unreachable';
   const statusClass = !daemonConnected ? 'disconnected' : contextUnreachable || contextSlow || missingExecHelper ? 'warning' : 'connected';
   const activeProfileColor =
     profiles.data?.profiles.find((p) => p.name === activeProfile)?.color ||
@@ -167,7 +178,7 @@ export function TopBar() {
           >
             <span className="topbar-network-alert-icon">{contextUnreachable ? '!' : '\u2026'}</span>
             <span className="topbar-network-alert-text">
-              {contextUnreachable ? 'Context unreachable' : 'Checking context connectivity'}
+              {contextUnreachable ? contextAlertText : 'Checking context connectivity'}
             </span>
             <span className="topbar-network-alert-action">Retry</span>
           </button>

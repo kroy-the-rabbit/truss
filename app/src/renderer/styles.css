@@ -5455,3 +5455,167 @@ body {
 .metrics-node-debug-del-btn { font-size: 10px; padding: 1px 5px; opacity: 0.6; background: transparent; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; color: var(--text-dim); }
 .metrics-node-debug-del-btn:hover { opacity: 1; color: var(--color-error, #f44336); border-color: currentColor; background: transparent; }
 .metrics-debug-pod-tag { font-size: 9px; background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); border-radius: 3px; padding: 1px 4px; margin-right: 4px; vertical-align: middle; }
+
+/* ── Context sign-in banner ─────────────────────────────────────────────── */
+.context-auth-banner {
+  padding: 8px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 60%, var(--border));
+  background: color-mix(in srgb, var(--warning) 14%, var(--bg-secondary));
+  color: var(--text-primary);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.context-auth-banner-quiet {
+  padding: 4px 12px;
+  border-bottom-color: var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+}
+
+.context-auth-banner-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.context-auth-banner-quiet .context-auth-banner-row {
+  align-items: center;
+}
+
+.context-auth-banner-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--warning);
+  color: var(--bg-primary);
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.context-auth-banner-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.context-auth-banner-title {
+  font-weight: 600;
+}
+
+.context-auth-banner-plugin {
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.context-auth-banner-summary {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.context-auth-banner-quiet .context-auth-banner-summary {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-auth-banner-command {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.context-auth-banner-command code {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre;
+  user-select: text;
+}
+
+.context-auth-banner-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.context-auth-btn {
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.context-auth-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.context-auth-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.context-auth-btn-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg-primary);
+}
+
+.context-auth-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.context-auth-banner-error {
+  color: var(--error);
+}
+
+.context-auth-banner-details summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.context-auth-banner-details pre {
+  margin-top: 4px;
+  padding: 6px 8px;
+  max-height: 160px;
+  overflow: auto;
+  border-radius: 4px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.metrics-error-state {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  color: var(--text-secondary);
+}
+
+.metrics-error-state-title {
+  color: var(--text-primary);
+  font-weight: 600;
+}
