@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { usePodInfo } from '../state/queries';
 import { useSessionEvent } from '../hooks/useSessionEvent';
+import { useDaemonReadOnly } from '../state/readOnlySync';
 
 export interface ExecTabSaveState {
   autoSave: boolean;
@@ -346,7 +347,20 @@ export function ExecTab({ name, namespace, context, initialContainer, tabId, onS
   }, []);
 
   const selectedInfo = allInfos.find((c) => c.name === container);
-  const canExec = selectedInfo?.state === 'running';
+  const containerRunning = selectedInfo?.state === 'running';
+  // Exec can run arbitrary commands in the pod, so it is a Write-mode action.
+  const readOnly = useDaemonReadOnly();
+  const canExec = containerRunning && !readOnly;
+
+  // Switching to read-only ends any live exec session.
+  useEffect(() => {
+    if (!readOnly || !wsRef.current) return;
+    manualCloseRef.current = true;
+    wsRef.current.close();
+    wsRef.current = null;
+    setConnected(false);
+    terminalRef.current?.write('\r\n[Disconnected: Truss switched to read-only mode]\r\n');
+  }, [readOnly]);
 
   useEffect(() => {
     if (!autoSave || !container) return;
@@ -428,6 +442,14 @@ export function ExecTab({ name, namespace, context, initialContainer, tabId, onS
 
   return (
     <div className="exec-tab" style={{ position: 'relative' }}>
+      {readOnly && !sessionLocked && !connected && (
+        <div className="session-locked-overlay">
+          <div className="session-locked-message">
+            <span className="session-locked-icon">🔒</span>
+            <span>Exec is disabled in read-only (RO) mode — switch to Write mode in the main window</span>
+          </div>
+        </div>
+      )}
       {sessionLocked && !connected && (
         <div className="session-locked-overlay">
           <div className="session-locked-message">
@@ -452,7 +474,7 @@ export function ExecTab({ name, namespace, context, initialContainer, tabId, onS
           <span className={`pod-phase-pill ${podPhase.toLowerCase()}`}>Pod: {podPhase}</span>
         )}
         <button className="exec-connect-btn" onClick={connect} disabled={!canExec || connected}>
-          {connected ? 'Connected' : canExec ? 'Connect' : 'Not Running'}
+          {connected ? 'Connected' : readOnly ? 'Read-only' : canExec ? 'Connect' : 'Not Running'}
         </button>
         {connected && (
           <button
@@ -521,7 +543,7 @@ export function ExecTab({ name, namespace, context, initialContainer, tabId, onS
         </button>
         {autoSave && savePath && <span className="logs-fetching" title={savePath}>Saving: {savePath.split('/').slice(-2).join('/')}</span>}
         <span className={`exec-status ${connected ? 'connected' : ''}`}>
-          {connected ? 'Connected' : error || (canExec ? 'Disconnected' : 'Container not running')}
+          {connected ? 'Connected' : readOnly ? 'Read-only mode' : error || (containerRunning ? 'Disconnected' : 'Container not running')}
         </span>
       </div>
       {runningContainers.length > 1 && (

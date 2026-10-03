@@ -234,6 +234,7 @@ func TestMutatingHTTPHandlersRejectedInReadOnlyMode(t *testing.T) {
 		{http.MethodPost, "/api/file/mkdir?context=c&namespace=ns&pod=p&path=/tmp/d", ""},
 		{http.MethodPost, "/api/nodes/debug", `{"context":"c","node":"n1"}`},
 		{http.MethodDelete, "/api/nodes/debug/delete?context=c&pod=truss-node-debug-x&namespace=default", ""},
+		{http.MethodGet, "/ws/exec?context=c&namespace=ns&pod=p&container=app", ""},
 	}
 	for _, tc := range cases {
 		req, err := http.NewRequest(tc.method, ts.URL+tc.path, strings.NewReader(tc.body))

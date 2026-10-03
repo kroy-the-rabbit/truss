@@ -1339,6 +1339,11 @@ func (s *Server) handleExecWS(_ string) http.HandlerFunc {
 			return
 		}
 
+		// Exec can run arbitrary commands in the pod, so it is a write action.
+		if s.rejectIfReadOnly(w) {
+			return
+		}
+
 		ctxName := r.URL.Query().Get("context")
 		if ctxName == "" {
 			ctxName = s.kubeMgr.ActiveContext()
