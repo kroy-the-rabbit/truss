@@ -1,4 +1,5 @@
 import { ChildProcess, spawn } from 'child_process';
+import crypto from 'crypto';
 import path from 'path';
 import { app } from 'electron';
 import http from 'http';
@@ -15,6 +16,15 @@ export interface StartDaemonOptions {
 }
 
 let supervisor: DaemonSupervisor<DaemonConfig> | null = null;
+
+// Secret for trussd's plugin secure-storage endpoints. Unlike the bearer token
+// it is never sent to a renderer, so only main can reach plugin secrets (and
+// main injects the caller's bound plugin id). Stable across daemon restarts.
+const pluginStorageToken = crypto.randomBytes(32).toString('hex');
+
+export function getPluginStorageToken(): string {
+  return pluginStorageToken;
+}
 
 function findDaemonBinary(): string {
   const binaryName = process.platform === 'win32' ? 'trussd.exe' : 'trussd';
@@ -102,6 +112,7 @@ export async function launchDaemon(opts?: StartDaemonOptions): Promise<DaemonHan
       enrichPath(opts?.pathHints || []),
       process.platform === 'win32' ? ';' : ':',
     );
+    env.TRUSS_PLUGIN_STORAGE_TOKEN = pluginStorageToken;
 
     // stdin is a pipe we never write to: when Electron dies (even SIGKILL) the
     // write end closes and trussd sees EOF and exits (--exit-on-stdin-eof).

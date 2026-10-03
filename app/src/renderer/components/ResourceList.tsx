@@ -4,7 +4,6 @@ import { useResources, useHelmReleases, useDeleteResource, useUninstallRelease, 
 import { ContextMenu, ContextMenuItem } from './ContextMenu';
 import { useClassifyHealth, toPluginResource } from '../plugins';
 import { pluginRegistry } from '../plugins/registry';
-import { createPluginAPI } from '../plugins/api';
 import { describeQueryError, isRbacDeniedError } from '../lib/connectErrors';
 
 type SortField = 'name' | 'namespace' | 'status' | 'age';
@@ -473,7 +472,6 @@ export function ResourceList() {
   }, []);
   const classifyHealth = useClassifyHealth();
   const tableBodyRef = useRef<HTMLDivElement>(null);
-  const pluginApi = useMemo(() => createPluginAPI('@truss/builtin'), []);
 
   const toggleSort = useCallback((field: SortField) => {
     if (sortField === field) {
@@ -778,7 +776,7 @@ export function ResourceList() {
                           items.push({
                             label: pluginItem.label,
                             danger: pluginItem.isDanger,
-                            onClick: () => pluginItem.onClick(pluginRes, pluginApi),
+                            onClick: () => pluginItem.onClick(pluginRes, pluginRegistry.apiFor(pluginItem._pluginId)),
                           });
                         }
                       }

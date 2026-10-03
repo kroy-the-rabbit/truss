@@ -63,6 +63,9 @@ type Server struct {
 	// writeEnabled is false (read-only) by default so the zero value fails
 	// closed; see ReadOnly/SetReadOnly in readonly.go.
 	writeEnabled atomic.Bool
+	// pluginStorageToken gates the plugin secure-storage endpoints; see
+	// plugin_storage_auth.go.
+	pluginStorageToken string
 }
 
 // New creates a new Server.
@@ -2493,6 +2496,9 @@ func (s *Server) handlePluginSecureStorageGet(w http.ResponseWriter, r *http.Req
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.authorizePluginStorage(w, r) {
+		return
+	}
 	var body struct {
 		PluginID string `json:"plugin_id"`
 		Key      string `json:"key"`
@@ -2522,6 +2528,9 @@ func (s *Server) handlePluginSecureStorageGet(w http.ResponseWriter, r *http.Req
 func (s *Server) handlePluginSecureStorageSet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorizePluginStorage(w, r) {
 		return
 	}
 	var body struct {
@@ -2560,6 +2569,9 @@ func (s *Server) handlePluginSecureStorageSet(w http.ResponseWriter, r *http.Req
 func (s *Server) handlePluginSecureStorageDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorizePluginStorage(w, r) {
 		return
 	}
 	var body struct {

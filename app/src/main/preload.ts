@@ -129,15 +129,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Plugin IPC
   pluginList: () => ipcRenderer.invoke('plugin-list'),
-  pluginReadFile: (pluginId: string, relativePath: string) =>
-    ipcRenderer.invoke('plugin-read-file', pluginId, relativePath),
-  pluginStorageGet: (pluginId: string, key: string) =>
-    ipcRenderer.invoke('plugin-storage-get', pluginId, key),
-  pluginStorageSet: (pluginId: string, key: string, value: unknown) =>
-    ipcRenderer.invoke('plugin-storage-set', pluginId, key, value),
-  pluginStorageDelete: (pluginId: string, key: string) =>
-    ipcRenderer.invoke('plugin-storage-delete', pluginId, key),
-  pluginSetEnabled: (pluginId: string, enabled: boolean) =>
-    ipcRenderer.invoke('plugin-set-enabled', pluginId, enabled),
+  // Returns approved entry code plus a one-time per-plugin storage capability.
+  pluginLoad: (pluginIds: string[]) => ipcRenderer.invoke('plugin-load', pluginIds),
+  // Storage calls carry the opaque capability, never a plugin id.
+  pluginStorageGet: (capability: string, key: string) =>
+    ipcRenderer.invoke('plugin-storage-get', capability, key),
+  pluginStorageSet: (capability: string, key: string, value: unknown) =>
+    ipcRenderer.invoke('plugin-storage-set', capability, key, value),
+  pluginStorageDelete: (capability: string, key: string) =>
+    ipcRenderer.invoke('plugin-storage-delete', capability, key),
+  pluginSecureStorage: (capability: string, op: 'get' | 'set' | 'delete', key: string, value?: unknown) =>
+    ipcRenderer.invoke('plugin-secure-storage', capability, op, key, value),
+  // Approving always shows a native confirmation dialog in main.
+  pluginSetApproval: (pluginId: string, approve: boolean) =>
+    ipcRenderer.invoke('plugin-set-approval', pluginId, approve),
   openPluginDirectory: () => ipcRenderer.invoke('open-plugin-directory'),
 });

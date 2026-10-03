@@ -50,7 +50,16 @@ export interface PluginRecord {
   path: string;      // absolute path to plugin directory ('' for built-ins)
   isBuiltin?: boolean;
   loadError?: string;
+  // Consent state for third-party plugins (set by main; absent for built-ins).
+  // Only 'approved' plugins are enabled.
+  consent?: PluginConsentStatus;
+  // True when the user has not decided yet (new plugin, pre-consent install,
+  // or code changed since approval). Drives the startup consent modal.
+  needsConsent?: boolean;
+  fingerprint?: string | null;
 }
+
+export type PluginConsentStatus = 'approved' | 'pending' | 'changed' | 'denied' | 'invalid';
 
 // --- Extension point interfaces ---
 

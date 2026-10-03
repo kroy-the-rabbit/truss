@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -36,11 +37,22 @@ func newSetupServer(t *testing.T) *Server {
 	}
 	mgr := kube.NewManager(store)
 	return &Server{
-		store:         store,
-		kubeMgr:       mgr,
-		watchCache:    watchcache.New(),
-		searchIndexes: make(map[string]*searchIndexState),
+		store:              store,
+		kubeMgr:            mgr,
+		watchCache:         watchcache.New(),
+		searchIndexes:      make(map[string]*searchIndexState),
+		pluginStorageToken: testPluginStorageToken,
 	}
+}
+
+const testPluginStorageToken = "test-plugin-storage-token"
+
+// pluginStorageReq builds a plugin secure-storage request carrying the
+// main-process-only storage token.
+func pluginStorageReq(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set(PluginStorageTokenHeader, testPluginStorageToken)
+	return req
 }
 
 // initStore initialises the server's store with a password method.
@@ -526,7 +538,7 @@ func TestHandleProfilesSetColorSuccess(t *testing.T) {
 
 func TestHandlePluginSecureStorageGetMethodGuard(t *testing.T) {
 	s := newSetupServer(t)
-	req := httptest.NewRequest(http.MethodGet, "/api/plugin-storage/get", nil)
+	req := pluginStorageReq(http.MethodGet, "/api/plugin-storage/get", nil)
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageGet(rr, req)
 	if rr.Code != http.StatusMethodNotAllowed {
@@ -536,7 +548,7 @@ func TestHandlePluginSecureStorageGetMethodGuard(t *testing.T) {
 
 func TestHandlePluginSecureStorageGetBadJSON(t *testing.T) {
 	s := newSetupServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/api/plugin-storage/get", bytes.NewBufferString("{bad"))
+	req := pluginStorageReq(http.MethodPost, "/api/plugin-storage/get", bytes.NewBufferString("{bad"))
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageGet(rr, req)
 	if rr.Code != http.StatusBadRequest {
@@ -547,7 +559,7 @@ func TestHandlePluginSecureStorageGetBadJSON(t *testing.T) {
 func TestHandlePluginSecureStorageGetInvalidPluginID(t *testing.T) {
 	s := newSetupServer(t)
 	body := map[string]string{"plugin_id": "bad id!", "key": "validkey"}
-	req := httptest.NewRequest(http.MethodPost, "/api/plugin-storage/get", toJSONBody(t, body))
+	req := pluginStorageReq(http.MethodPost, "/api/plugin-storage/get", toJSONBody(t, body))
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageGet(rr, req)
 	if rr.Code != http.StatusBadRequest {
@@ -558,7 +570,7 @@ func TestHandlePluginSecureStorageGetInvalidPluginID(t *testing.T) {
 func TestHandlePluginSecureStorageGetInvalidKey(t *testing.T) {
 	s := newSetupServer(t)
 	body := map[string]string{"plugin_id": "myplugin", "key": "bad key?"}
-	req := httptest.NewRequest(http.MethodPost, "/api/plugin-storage/get", toJSONBody(t, body))
+	req := pluginStorageReq(http.MethodPost, "/api/plugin-storage/get", toJSONBody(t, body))
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageGet(rr, req)
 	if rr.Code != http.StatusBadRequest {
@@ -570,7 +582,7 @@ func TestHandlePluginSecureStorageGetMissingKeyReturnsNull(t *testing.T) {
 	s := newSetupServer(t)
 	initStore(t, s, "correct-horse-battery-staple")
 	body := map[string]string{"plugin_id": "myplugin", "key": "nokey"}
-	req := httptest.NewRequest(http.MethodPost, "/api/plugin-storage/get", toJSONBody(t, body))
+	req := pluginStorageReq(http.MethodPost, "/api/plugin-storage/get", toJSONBody(t, body))
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageGet(rr, req)
 	if rr.Code != http.StatusOK {
@@ -591,7 +603,7 @@ func TestHandlePluginSecureStorageGetFoundValue(t *testing.T) {
 		t.Fatalf("SetSecureValue: %v", err)
 	}
 	body := map[string]string{"plugin_id": "myplugin", "key": "config"}
-	req := httptest.NewRequest(http.MethodPost, "/api/plugin-storage/get", toJSONBody(t, body))
+	req := pluginStorageReq(http.MethodPost, "/api/plugin-storage/get", toJSONBody(t, body))
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageGet(rr, req)
 	if rr.Code != http.StatusOK {
@@ -610,7 +622,7 @@ func TestHandlePluginSecureStorageGetFoundValue(t *testing.T) {
 
 func TestHandlePluginSecureStorageSetMethodGuard(t *testing.T) {
 	s := newSetupServer(t)
-	req := httptest.NewRequest(http.MethodGet, "/api/plugin-storage/set", nil)
+	req := pluginStorageReq(http.MethodGet, "/api/plugin-storage/set", nil)
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageSet(rr, req)
 	if rr.Code != http.StatusMethodNotAllowed {
@@ -620,7 +632,7 @@ func TestHandlePluginSecureStorageSetMethodGuard(t *testing.T) {
 
 func TestHandlePluginSecureStorageSetBadJSON(t *testing.T) {
 	s := newSetupServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/api/plugin-storage/set", bytes.NewBufferString("{bad"))
+	req := pluginStorageReq(http.MethodPost, "/api/plugin-storage/set", bytes.NewBufferString("{bad"))
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageSet(rr, req)
 	if rr.Code != http.StatusBadRequest {
@@ -631,7 +643,7 @@ func TestHandlePluginSecureStorageSetBadJSON(t *testing.T) {
 func TestHandlePluginSecureStorageSetInvalidPluginID(t *testing.T) {
 	s := newSetupServer(t)
 	body := map[string]any{"plugin_id": "bad id", "key": "k", "value": `"v"`}
-	req := httptest.NewRequest(http.MethodPost, "/api/plugin-storage/set", toJSONBody(t, body))
+	req := pluginStorageReq(http.MethodPost, "/api/plugin-storage/set", toJSONBody(t, body))
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageSet(rr, req)
 	if rr.Code != http.StatusBadRequest {
@@ -643,7 +655,7 @@ func TestHandlePluginSecureStorageSetMissingValue(t *testing.T) {
 	s := newSetupServer(t)
 	// Omit the "value" field entirely so RawMessage is nil/empty.
 	body := bytes.NewBufferString(`{"plugin_id":"myplugin","key":"k"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/plugin-storage/set", body)
+	req := pluginStorageReq(http.MethodPost, "/api/plugin-storage/set", body)
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageSet(rr, req)
 	if rr.Code != http.StatusBadRequest {
@@ -655,7 +667,7 @@ func TestHandlePluginSecureStorageSetSuccess(t *testing.T) {
 	s := newSetupServer(t)
 	initStore(t, s, "correct-horse-battery-staple")
 	body := bytes.NewBufferString(`{"plugin_id":"myplugin","key":"cfg","value":{"token":"abc"}}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/plugin-storage/set", body)
+	req := pluginStorageReq(http.MethodPost, "/api/plugin-storage/set", body)
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageSet(rr, req)
 	if rr.Code != http.StatusOK {
@@ -669,7 +681,7 @@ func TestHandlePluginSecureStorageSetSuccess(t *testing.T) {
 
 func TestHandlePluginSecureStorageDeleteMethodGuard(t *testing.T) {
 	s := newSetupServer(t)
-	req := httptest.NewRequest(http.MethodGet, "/api/plugin-storage/delete", nil)
+	req := pluginStorageReq(http.MethodGet, "/api/plugin-storage/delete", nil)
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageDelete(rr, req)
 	if rr.Code != http.StatusMethodNotAllowed {
@@ -679,7 +691,7 @@ func TestHandlePluginSecureStorageDeleteMethodGuard(t *testing.T) {
 
 func TestHandlePluginSecureStorageDeleteBadJSON(t *testing.T) {
 	s := newSetupServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/api/plugin-storage/delete", bytes.NewBufferString("{bad"))
+	req := pluginStorageReq(http.MethodPost, "/api/plugin-storage/delete", bytes.NewBufferString("{bad"))
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageDelete(rr, req)
 	if rr.Code != http.StatusBadRequest {
@@ -690,7 +702,7 @@ func TestHandlePluginSecureStorageDeleteBadJSON(t *testing.T) {
 func TestHandlePluginSecureStorageDeleteInvalidPluginID(t *testing.T) {
 	s := newSetupServer(t)
 	body := map[string]string{"plugin_id": "bad id!", "key": "k"}
-	req := httptest.NewRequest(http.MethodPost, "/api/plugin-storage/delete", toJSONBody(t, body))
+	req := pluginStorageReq(http.MethodPost, "/api/plugin-storage/delete", toJSONBody(t, body))
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageDelete(rr, req)
 	if rr.Code != http.StatusBadRequest {
@@ -706,7 +718,7 @@ func TestHandlePluginSecureStorageDeleteSuccess(t *testing.T) {
 		t.Fatalf("SetSecureValue: %v", err)
 	}
 	body := map[string]string{"plugin_id": "myplugin", "key": "todel"}
-	req := httptest.NewRequest(http.MethodPost, "/api/plugin-storage/delete", toJSONBody(t, body))
+	req := pluginStorageReq(http.MethodPost, "/api/plugin-storage/delete", toJSONBody(t, body))
 	rr := httptest.NewRecorder()
 	s.handlePluginSecureStorageDelete(rr, req)
 	if rr.Code != http.StatusOK {
@@ -874,5 +886,52 @@ contexts: []
 	}
 	if cmd != "" || len(args) != 0 {
 		t.Errorf("expected empty for no current-context, got cmd=%q", cmd)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// plugin secure-storage caller authorisation
+// ---------------------------------------------------------------------------
+
+func TestPluginSecureStorageRequiresMainProcessToken(t *testing.T) {
+	handlers := map[string]func(*Server, http.ResponseWriter, *http.Request){
+		"get":    (*Server).handlePluginSecureStorageGet,
+		"set":    (*Server).handlePluginSecureStorageSet,
+		"delete": (*Server).handlePluginSecureStorageDelete,
+	}
+	cases := []struct {
+		name        string
+		serverToken string
+		header      string
+	}{
+		{"missing header", testPluginStorageToken, ""},
+		{"wrong header", testPluginStorageToken, "not-the-token"},
+		{"daemon has no token (fail closed)", "", ""},
+		{"daemon has no token, caller sends a value", "", "anything"},
+	}
+	for op, h := range handlers {
+		for _, tc := range cases {
+			t.Run(op+"/"+tc.name, func(t *testing.T) {
+				s := newSetupServer(t)
+				initStore(t, s, "correct-horse-battery-staple")
+				if err := s.store.SetSecureValue("victim:secret", `"s3cret"`); err != nil {
+					t.Fatalf("SetSecureValue: %v", err)
+				}
+				s.SetPluginStorageToken(tc.serverToken)
+				body := map[string]any{"plugin_id": "victim", "key": "secret", "value": "x"}
+				req := httptest.NewRequest(http.MethodPost, "/api/plugins/secure-storage/"+op, toJSONBody(t, body))
+				if tc.header != "" {
+					req.Header.Set(PluginStorageTokenHeader, tc.header)
+				}
+				rr := httptest.NewRecorder()
+				h(s, rr, req)
+				if rr.Code != http.StatusForbidden {
+					t.Fatalf("status = %d, want 403; body: %s", rr.Code, rr.Body.String())
+				}
+				if v, ok := s.store.GetSecureValue("victim:secret"); !ok || v != `"s3cret"` {
+					t.Fatalf("stored value changed: %q %v", v, ok)
+				}
+			})
+		}
 	}
 }

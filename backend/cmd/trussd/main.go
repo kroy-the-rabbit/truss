@@ -55,6 +55,11 @@ func main() {
 
 	// Start server.
 	srv := server.New(kubeMgr, store, version)
+	// The plugin storage secret is known only to the Electron main process.
+	// Drop it from our environment so exec credential plugins and other
+	// children never inherit it.
+	srv.SetPluginStorageToken(os.Getenv("TRUSS_PLUGIN_STORAGE_TOKEN"))
+	_ = os.Unsetenv("TRUSS_PLUGIN_STORAGE_TOKEN")
 	port, err := srv.Start(token)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start server: %v\n", err)

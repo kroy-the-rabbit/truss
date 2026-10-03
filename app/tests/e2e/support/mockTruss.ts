@@ -117,11 +117,12 @@ export async function installElectronApiMock(page: Page) {
       getYamlDiffPayload: async () => null,
       submitYamlDiffDecision: async () => undefined,
       pluginList: async () => [],
-      pluginReadFile: async () => '',
+      pluginLoad: async () => [],
       pluginStorageGet: async () => null,
       pluginStorageSet: async () => undefined,
       pluginStorageDelete: async () => undefined,
-      pluginSetEnabled: async () => undefined,
+      pluginSecureStorage: async () => null,
+      pluginSetApproval: async () => ({ approved: false }),
       openPluginDirectory: async () => undefined,
     };
   }, { daemonPort: DAEMON_PORT });

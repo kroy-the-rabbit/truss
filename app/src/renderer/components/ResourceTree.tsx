@@ -3,14 +3,13 @@ import { useAppStore } from '../state/store';
 import { useResourceKinds, useResourceCounts } from '../state/queries';
 import { GVR } from '../api/gen/truss/v1/resources_pb';
 import { useTreeSections } from '../plugins/hooks';
-import { createPluginAPI } from '../plugins/api';
+import { pluginRegistry } from '../plugins/registry';
 import { isAuthError, isRbacDeniedError } from '../lib/connectErrors';
 
 export function ResourceTree() {
   const { activeContext, activeNamespace, setSelectedKind, selectedKindLabel, activePane, setActivePane } = useAppStore();
   const resourceKinds = useResourceKinds(activeContext);
   const treeSections = useTreeSections();
-  const pluginApi = useMemo(() => createPluginAPI('@truss/builtin'), []);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set(['Workloads', 'Config', 'Networking']));
   const [collapsedCustomOwners, setCollapsedCustomOwners] = useState<Set<string>>(new Set());
   const [discoveryElapsedSec, setDiscoveryElapsedSec] = useState(0);
@@ -372,7 +371,7 @@ export function ResourceTree() {
       ))}
       {treeSections.map((section) => (
         <React.Fragment key={section.id}>
-          {section.render({ api: pluginApi })}
+          {section.render({ api: pluginRegistry.apiFor(section._pluginId) })}
         </React.Fragment>
       ))}
     </div>

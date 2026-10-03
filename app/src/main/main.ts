@@ -8,6 +8,7 @@ import {
   enrichPath,
   getDaemonConfig,
   getDaemonState,
+  getPluginStorageToken,
   startDaemonSupervisor,
   stopDaemon,
 } from './daemon';
@@ -19,7 +20,21 @@ import {
   hasLiveProcess,
   PORT_FORWARD_MAX_RESTARTS,
 } from './portForwardLogic';
-import { readPluginFileUtf8 } from './pluginFs';
+import {
+  APPROVALS_FILE,
+  ApprovalMap,
+  buildPluginRecords,
+  DiscoveredPlugin,
+  discoverPluginsOnDisk,
+  evaluateConsent,
+  migrateLegacyEnabledMap,
+  PluginCapabilityRegistry,
+  readApprovals,
+  readPluginFromDisk,
+  recordDecision,
+  writeApprovals,
+} from './pluginConsent';
+import { pluginSecureStorageRequest } from './pluginSecureStorage';
 import { ApprovedRoots, assertInsideApprovedRoot } from './pathSafety';
 import { assertTrustedSender, installSecurityGuards } from './security';
 
@@ -1346,80 +1361,156 @@ function assertFileTransferSender(event: Electron.IpcMainInvokeEvent): void {
   }
 }
 
+// Legacy (pre-consent) enable map. Only read, to migrate explicit disables.
 function getEnabledMapPath(): string {
   return path.join(getPluginsDir(), 'enabled.json');
 }
 
-function readEnabledMap(): Record<string, boolean> {
+function readEnabledMap(): Record<string, unknown> {
   try {
-    return JSON.parse(fs.readFileSync(getEnabledMapPath(), 'utf8')) as Record<string, boolean>;
+    return JSON.parse(fs.readFileSync(getEnabledMapPath(), 'utf8')) as Record<string, unknown>;
   } catch {
     return {};
   }
 }
 
-function writeEnabledMap(map: Record<string, boolean>): void {
-  const dir = getPluginsDir();
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(getEnabledMapPath(), JSON.stringify(map, null, 2), { encoding: 'utf8', mode: 0o600 });
+// Approvals live outside the plugins directory and are only written by main.
+function getApprovalsPath(): string {
+  return path.join(getConfigDir(), APPROVALS_FILE);
 }
 
-// plugin-list: discover plugin directories and return PluginRecord[] compatible objects.
+const pluginCaps = new PluginCapabilityRegistry();
+
+// Storage capabilities are per renderer document: drop them when the page
+// navigates (reload), crashes or goes away. The host claims fresh ones on load
+// before it runs any plugin code.
+app.on('web-contents-created', (_event, contents) => {
+  const id = contents.id;
+  contents.on('did-navigate', () => pluginCaps.resetOwner(id));
+  contents.on('render-process-gone', () => pluginCaps.resetOwner(id));
+  contents.on('destroyed', () => pluginCaps.resetOwner(id));
+});
+
+function loadPluginApprovals(discovered: DiscoveredPlugin[]): ApprovalMap {
+  const approvals = readApprovals(getApprovalsPath());
+  const migrated = migrateLegacyEnabledMap(approvals, readEnabledMap(), discovered);
+  if (migrated.changed) writeApprovals(getApprovalsPath(), migrated.approvals);
+  return migrated.approvals;
+}
+
+function readApprovedPlugin(pluginId: string): DiscoveredPlugin | null {
+  resolvePluginDir(pluginId); // validates the id
+  const plugin = readPluginFromDisk(getPluginsDir(), pluginId);
+  const approvals = readApprovals(getApprovalsPath());
+  return evaluateConsent(approvals[pluginId], plugin.fingerprint).status === 'approved' ? plugin : null;
+}
+
+// Resolve the plugin a storage call is for from its capability token. The
+// renderer never names the plugin, so plugin A cannot act as plugin B.
+function requirePluginCapability(event: Electron.IpcMainInvokeEvent, capability: unknown): string {
+  assertTrustedSender(event);
+  const pluginId = pluginCaps.resolve(event.sender.id, capability);
+  if (!pluginId) throw new Error('Invalid plugin storage capability');
+  if (readApprovals(getApprovalsPath())[pluginId]?.decision !== 'approved') {
+    pluginCaps.revokePlugin(pluginId);
+    throw new Error(`Plugin "${pluginId}" is not approved`);
+  }
+  return pluginId;
+}
+
+// plugin-list: discover plugin directories and return PluginRecord[] compatible
+// objects. Third-party plugins are enabled only when approved and unchanged.
 ipcMain.handle('plugin-list', (event) => {
   assertTrustedSender(event);
-  const pluginsDir = getPluginsDir();
-  const enabledMap = readEnabledMap();
-  const records: unknown[] = [];
+  const discovered = discoverPluginsOnDisk(getPluginsDir());
+  return buildPluginRecords(discovered, loadPluginApprovals(discovered));
+});
 
-  try {
-    const entries = fs.readdirSync(pluginsDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const pluginDir = path.join(pluginsDir, entry.name);
-      const manifestPath = path.join(pluginDir, 'manifest.json');
-      try {
-        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-        const pluginId = manifest.id as string;
-        records.push({
-          manifest,
-          enabled: enabledMap[pluginId] !== false, // enabled by default
-          path: pluginDir,
-          isBuiltin: false,
-        });
-      } catch {
-        // Skip directories without valid manifests.
+// plugin-load: return the approved entry code (the exact bytes that were
+// fingerprinted) and a storage capability for each requested plugin. A
+// capability is minted at most once per plugin per renderer document; the host
+// requests all of them in one call before executing any plugin code.
+ipcMain.handle('plugin-load', (event, pluginIds: unknown) => {
+  assertTrustedSender(event);
+  if (!Array.isArray(pluginIds)) throw new Error('pluginIds must be an array');
+  return pluginIds.map((pluginId) => {
+    if (typeof pluginId !== 'string') return { pluginId: String(pluginId), error: 'Invalid plugin id' };
+    try {
+      const plugin = readApprovedPlugin(pluginId);
+      if (!plugin || plugin.entryCode === null) {
+        return { pluginId, error: 'Plugin is not approved or has changed since approval' };
       }
+      return { pluginId, code: plugin.entryCode, capability: pluginCaps.issue(event.sender.id, pluginId) };
+    } catch (err) {
+      return { pluginId, error: err instanceof Error ? err.message : String(err) };
     }
-  } catch {
-    // plugins directory doesn't exist yet — return empty list.
+  });
+});
+
+// plugin-set-approval: the only way to change a plugin's consent. Approving
+// always ends in a native confirmation dialog rendered by main, which renderer
+// script (including already-loaded plugin code) cannot click; a renderer-side
+// user-gesture check could be satisfied by synthetic events. Keeping a plugin
+// disabled needs no confirmation because it only reduces privilege.
+ipcMain.handle('plugin-set-approval', async (event, pluginId: string, approve: boolean) => {
+  assertTrustedSender(event);
+  resolvePluginDir(pluginId);
+  const plugin = readPluginFromDisk(getPluginsDir(), pluginId);
+  if (!plugin.manifest) throw new Error(`Plugin "${pluginId}" not found`);
+  const approvals = readApprovals(getApprovalsPath());
+
+  if (approve !== true) {
+    writeApprovals(getApprovalsPath(), recordDecision(approvals, plugin, 'denied'));
+    pluginCaps.revokePlugin(pluginId);
+    return { approved: false };
   }
 
-  return records;
+  if (!plugin.fingerprint) throw new Error(plugin.error || `Plugin "${pluginId}" cannot be read`);
+  const name = typeof plugin.manifest.name === 'string' ? plugin.manifest.name : pluginId;
+  const version = typeof plugin.manifest.version === 'string' ? ` v${plugin.manifest.version}` : '';
+  const parent = BrowserWindow.fromWebContents(event.sender);
+  const opts: Electron.MessageBoxOptions = {
+    type: 'warning',
+    buttons: ['Keep disabled', 'Enable plugin'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    title: 'Enable plugin',
+    message: `Enable "${name}"${version}?`,
+    detail: `Folder: ${plugin.path}\nFingerprint: ${plugin.fingerprint.slice(0, 16)}\n\n`
+      + 'Plugins run inside Truss with access to your clusters. Only enable plugins you trust.',
+  };
+  const { response } = parent ? await dialog.showMessageBox(parent, opts) : await dialog.showMessageBox(opts);
+  if (response !== 1) return { approved: false, cancelled: true };
+
+  // Re-read after the dialog so we pin exactly what is on disk now.
+  const current = readPluginFromDisk(getPluginsDir(), pluginId);
+  if (current.fingerprint !== plugin.fingerprint) {
+    throw new Error(`Plugin "${pluginId}" changed while awaiting confirmation; try again`);
+  }
+  writeApprovals(getApprovalsPath(), recordDecision(readApprovals(getApprovalsPath()), current, 'approved'));
+  pluginCaps.revokePlugin(pluginId);
+  return {
+    approved: true,
+    code: current.entryCode,
+    capability: pluginCaps.issue(event.sender.id, pluginId),
+  };
 });
 
-// plugin-read-file: read a file from within a plugin's directory.
-// Path traversal protection: lexical check first, then symlink-resolved check.
-ipcMain.handle('plugin-read-file', (event, pluginId: string, relativePath: string) => {
-  assertTrustedSender(event);
-  const pluginDir = resolvePluginDir(pluginId);
-  return readPluginFileUtf8(pluginDir, relativePath);
-});
-
-// plugin-storage-get: read a key from a plugin's persistent storage.
-ipcMain.handle('plugin-storage-get', (event, pluginId: string, key: string) => {
-  assertTrustedSender(event);
+// plugin-storage-*: per-plugin JSON storage, keyed by the caller's capability.
+ipcMain.handle('plugin-storage-get', (event, capability: unknown, key: string) => {
+  const pluginId = requirePluginCapability(event, capability);
   const storagePath = path.join(resolvePluginDir(pluginId), 'storage.json');
   try {
     const data = JSON.parse(fs.readFileSync(storagePath, 'utf8')) as Record<string, unknown>;
-    return data[key] ?? null;
+    return Object.prototype.hasOwnProperty.call(data, key) ? data[key] ?? null : null;
   } catch {
     return null;
   }
 });
 
-// plugin-storage-set: write a key to a plugin's persistent storage.
-ipcMain.handle('plugin-storage-set', (event, pluginId: string, key: string, value: unknown) => {
-  assertTrustedSender(event);
+ipcMain.handle('plugin-storage-set', (event, capability: unknown, key: string, value: unknown) => {
+  const pluginId = requirePluginCapability(event, capability);
   const pluginDir = resolvePluginDir(pluginId);
   const storagePath = path.join(pluginDir, 'storage.json');
   fs.mkdirSync(pluginDir, { recursive: true, mode: 0o700 });
@@ -1429,9 +1520,8 @@ ipcMain.handle('plugin-storage-set', (event, pluginId: string, key: string, valu
   fs.writeFileSync(storagePath, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
 });
 
-// plugin-storage-delete: remove a key from a plugin's persistent storage.
-ipcMain.handle('plugin-storage-delete', (event, pluginId: string, key: string) => {
-  assertTrustedSender(event);
+ipcMain.handle('plugin-storage-delete', (event, capability: unknown, key: string) => {
+  const pluginId = requirePluginCapability(event, capability);
   const storagePath = path.join(resolvePluginDir(pluginId), 'storage.json');
   try {
     const data = JSON.parse(fs.readFileSync(storagePath, 'utf8')) as Record<string, unknown>;
@@ -1440,12 +1530,25 @@ ipcMain.handle('plugin-storage-delete', (event, pluginId: string, key: string) =
   } catch { /* nothing to delete */ }
 });
 
-// plugin-set-enabled: enable or disable a plugin by id.
-ipcMain.handle('plugin-set-enabled', (event, pluginId: string, enabled: boolean) => {
-  assertTrustedSender(event);
-  const map = readEnabledMap();
-  map[pluginId] = enabled;
-  writeEnabledMap(map);
+// plugin-secure-storage: forwarded to trussd by main with the bound plugin id
+// and the main-only plugin storage secret.
+ipcMain.handle('plugin-secure-storage', async (event, capability: unknown, op: string, key: string, value?: unknown) => {
+  const pluginId = requirePluginCapability(event, capability);
+  if (op !== 'get' && op !== 'set' && op !== 'delete') throw new Error('Invalid secure storage operation');
+  const cfg = getDaemonConfig();
+  if (!cfg) throw new Error('Daemon is not running');
+  const body: { plugin_id: string; key: string; value?: unknown } = { plugin_id: pluginId, key };
+  if (op === 'set') body.value = value;
+  const res = await pluginSecureStorageRequest(
+    { port: cfg.port, token: cfg.token, storageToken: getPluginStorageToken() },
+    op,
+    body,
+  );
+  if (res.status < 200 || res.status >= 300) {
+    if (op === 'get') return null;
+    throw new Error(typeof res.data.error === 'string' ? res.data.error : `Secure storage failed (HTTP ${res.status})`);
+  }
+  return op === 'get' ? (res.data.value ?? null) : undefined;
 });
 
 // open-plugin-directory: open the plugins folder in the system file manager.
