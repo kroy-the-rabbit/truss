@@ -16,6 +16,18 @@ import (
 	"github.com/kroy/truss/backend/internal/server"
 )
 
+// mainTokenFromEnv reads the Electron-main-only credential and removes it from
+// the environment so child processes (exec credential plugins, helm, etc.)
+// never inherit it. A missing or too-short token disables main-only endpoints.
+func mainTokenFromEnv() string {
+	tok := os.Getenv("TRUSS_MAIN_TOKEN")
+	_ = os.Unsetenv("TRUSS_MAIN_TOKEN")
+	if len(tok) < 32 {
+		return ""
+	}
+	return tok
+}
+
 // version is set at build time via -ldflags="-X main.version=<tag>"
 var version = "dev"
 
@@ -60,6 +72,7 @@ func main() {
 	// children never inherit it.
 	srv.SetPluginStorageToken(os.Getenv("TRUSS_PLUGIN_STORAGE_TOKEN"))
 	_ = os.Unsetenv("TRUSS_PLUGIN_STORAGE_TOKEN")
+	srv.SetMainToken(mainTokenFromEnv())
 	port, err := srv.Start(token)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start server: %v\n", err)

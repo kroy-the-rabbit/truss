@@ -3,9 +3,24 @@ package main
 import (
 	"errors"
 	"io"
+	"os"
 	"testing"
 	"time"
 )
+
+func TestMainTokenFromEnv(t *testing.T) {
+	t.Setenv("TRUSS_MAIN_TOKEN", "0123456789abcdef0123456789abcdef")
+	if got := mainTokenFromEnv(); got != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("got %q", got)
+	}
+	if _, ok := os.LookupEnv("TRUSS_MAIN_TOKEN"); ok {
+		t.Fatal("TRUSS_MAIN_TOKEN should be removed from the environment")
+	}
+	t.Setenv("TRUSS_MAIN_TOKEN", "short")
+	if got := mainTokenFromEnv(); got != "" {
+		t.Fatalf("short token should disable, got %q", got)
+	}
+}
 
 func TestWatchStdinEOFFiresOnClose(t *testing.T) {
 	pr, pw := io.Pipe()

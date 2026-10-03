@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import path from 'path';
 import { app } from 'electron';
 import http from 'http';
+import { randomBytes } from 'crypto';
 import { getLoginShellEnv, mergeShellEnv } from './shellEnv';
 import { DaemonHandle, DaemonStatePayload, DaemonSupervisor } from './daemonSupervisor';
 
@@ -25,6 +26,10 @@ const pluginStorageToken = crypto.randomBytes(32).toString('hex');
 export function getPluginStorageToken(): string {
   return pluginStorageToken;
 }
+// Main-process-only credential per daemon launch, keyed by that launch's
+// config object. Deliberately NOT part of DaemonConfig: getDaemonConfig() is
+// handed to renderers, and this token must never reach them.
+const mainTokens = new WeakMap<DaemonConfig, string>();
 
 function findDaemonBinary(): string {
   const binaryName = process.platform === 'win32' ? 'trussd.exe' : 'trussd';
@@ -113,6 +118,8 @@ export async function launchDaemon(opts?: StartDaemonOptions): Promise<DaemonHan
       process.platform === 'win32' ? ';' : ':',
     );
     env.TRUSS_PLUGIN_STORAGE_TOKEN = pluginStorageToken;
+    const mainToken = randomBytes(32).toString('hex');
+    env.TRUSS_MAIN_TOKEN = mainToken;
 
     // stdin is a pipe we never write to: when Electron dies (even SIGKILL) the
     // write end closes and trussd sees EOF and exits (--exit-on-stdin-eof).
@@ -169,8 +176,10 @@ export async function launchDaemon(opts?: StartDaemonOptions): Promise<DaemonHan
           settled = true;
           clearTimer();
           startupProcess = null;
+          const config: DaemonConfig = { port: resolvedPort, token: resolvedToken };
+          mainTokens.set(config, mainToken);
           resolve({
-            config: { port: resolvedPort, token: resolvedToken },
+            config,
             onExit(cb) {
               if (exitReason !== null) {
                 cb(exitReason);
@@ -310,6 +319,18 @@ export function getDaemonState(): DaemonStatePayload {
 
 export function getDaemonConfig(): DaemonConfig | null {
   return supervisor ? supervisor.getConfig() : null;
+}
+
+/**
+ * Daemon access for the main process only (adds the main-only token). Never
+ * expose the result through IPC/preload.
+ */
+export function getDaemonMainAccess(): (DaemonConfig & { mainToken: string }) | null {
+  const config = getDaemonConfig();
+  if (!config) return null;
+  const mainToken = mainTokens.get(config);
+  if (!mainToken) return null;
+  return { ...config, mainToken };
 }
 
 /** Trigger an immediate health ping (or a pending restart), e.g. after resume. */

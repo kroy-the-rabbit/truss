@@ -7,6 +7,7 @@ import {
   checkDaemonNow,
   enrichPath,
   getDaemonConfig,
+  getDaemonMainAccess,
   getDaemonState,
   getPluginStorageToken,
   startDaemonSupervisor,
@@ -37,6 +38,7 @@ import {
 import { pluginSecureStorageRequest } from './pluginSecureStorage';
 import { ApprovedRoots, assertInsideApprovedRoot } from './pathSafety';
 import { assertTrustedSender, installSecurityGuards } from './security';
+import { KubeconfigFiles, openExternalTerminal, TerminalCandidate } from './externalTerminal';
 
 let mainWindow: BrowserWindow | null = null;
 let logsWindow: BrowserWindow | null = null;
@@ -97,6 +99,20 @@ interface PortForwardRecord {
 
 const portForwards = new Map<string, PortForwardRecord>();
 let sessionLocked = false;
+
+// Temporary vault-scoped kubeconfigs handed to external terminals.
+let terminalKubeconfigs: KubeconfigFiles | null = null;
+function getTerminalKubeconfigs(): KubeconfigFiles {
+  if (!terminalKubeconfigs) {
+    terminalKubeconfigs = new KubeconfigFiles({
+      platform: process.platform,
+      env: process.env,
+      tempDir: app.getPath('temp'),
+      uid: typeof process.getuid === 'function' ? process.getuid() : 0,
+    });
+  }
+  return terminalKubeconfigs;
+}
 
 // Minimize persistent Chromium artifacts on disk.
 app.commandLine.appendSwitch('disable-http-cache');
@@ -546,6 +562,7 @@ function broadcastSessionEvent(type: string) {
 ipcMain.handle('session-broadcast', (_event, type: string) => {
   if (type === 'locked') {
     sessionLocked = true;
+    terminalKubeconfigs?.cleanupAll();
     for (const pf of portForwards.values()) {
       const wasPending = pf.restartPending;
       cancelPortForwardSupervision(pf);
@@ -1151,73 +1168,31 @@ ipcMain.handle('set-theme-mode', (_event, mode: unknown, tone?: unknown) => {
   };
 });
 
-// Handle "open in system terminal" requests.
-function shellEscapePosix(arg: string): string {
-  return `'${arg.replace(/'/g, `'\\''`)}'`;
-}
-
-function shellEscapeCmd(arg: string): string {
-  // Keep cmd.exe metacharacters inert while preserving argument boundaries.
-  return `"${arg.replace(/[%^&|<>()!"]/g, '^$&')}"`;
-}
-
-ipcMain.handle('open-external-terminal', (event, opts: Record<string, unknown>) => {
+// Handle "open in system terminal" requests. The terminal gets a private,
+// vault-scoped temporary kubeconfig (see externalTerminal.ts); a terminal
+// opened earlier loses cluster access after the vault locks or Truss quits,
+// because those files are deleted then (intended).
+ipcMain.handle('open-external-terminal', async (event, opts: unknown) => {
   assertTrustedSender(event);
-  const { type, context, namespace, pod, container, tailLines, timestamps } = opts as {
-    type: string;
-    context: string;
-    namespace: string;
-    pod: string;
-    container: string;
-    tailLines?: number;
-    timestamps?: boolean;
-  };
-
-  let cmd: string;
-  let args: string[];
-
-  if (type === 'exec') {
-    cmd = 'kubectl';
-    args = ['exec', '-it', '-n', namespace, pod, '-c', container];
-    if (context) args.push('--context', context);
-    args.push('--', '/bin/bash', '-c', 'exec bash 2>/dev/null || exec sh');
-  } else {
-    // logs
-    cmd = 'kubectl';
-    args = ['logs', '-f', '-n', namespace, pod, '-c', container];
-    if (context) args.push('--context', context);
-    if (tailLines && tailLines > 0) args.push('--tail', String(tailLines));
-    if (timestamps) args.push('--timestamps');
-  }
-
-  const fullCmdPosix = [cmd, ...args].map(shellEscapePosix).join(' ');
-  const fullCmdCmdExe = [cmd, ...args].map(shellEscapeCmd).join(' ');
-
-  const platform = process.platform;
-  if (platform === 'linux') {
-    const holdOpenCmd = `${fullCmdPosix}; exec bash`;
-    const terminals = [
-      { cmd: 'gnome-terminal', args: ['--', 'bash', '-lc', holdOpenCmd] },
-      { cmd: 'konsole', args: ['-e', 'bash', '-lc', holdOpenCmd] },
-      { cmd: 'xterm', args: ['-e', 'bash', '-lc', holdOpenCmd] },
-    ];
-    trySpawnTerminal(terminals);
-  } else if (platform === 'darwin') {
-    const escaped = `${fullCmdPosix}; exec bash`
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"');
-    spawn('osascript', ['-e', `tell application "Terminal" to do script "${escaped}"`], { detached: true, stdio: 'ignore' });
-  } else if (platform === 'win32') {
-    spawn('cmd.exe', ['/c', 'start', 'cmd', '/k', fullCmdCmdExe], { detached: true, stdio: 'ignore' });
-  }
-
-  return { ok: true };
+  return openExternalTerminal(opts, {
+    platform: process.platform,
+    env: process.env,
+    isLocked: () => sessionLocked,
+    getAccess: getDaemonMainAccess,
+    files: getTerminalKubeconfigs(),
+    launch: trySpawnTerminal,
+  });
 });
 
-function trySpawnTerminal(terminals: Array<{ cmd: string; args: string[] }>) {
+function trySpawnTerminal(terminals: TerminalCandidate[]) {
   if (terminals.length === 0) return;
   const [first, ...rest] = terminals;
-  const proc = spawn(first.cmd, first.args, { detached: true, stdio: 'ignore' });
+  const proc = spawn(first.cmd, first.args, {
+    detached: true,
+    stdio: 'ignore',
+    env: first.env,
+    windowsVerbatimArguments: first.windowsVerbatimArguments,
+  });
   proc.on('error', () => {
     trySpawnTerminal(rest);
   });
@@ -1879,6 +1854,7 @@ app.whenReady().then(async () => {
   });
   wipeTransientUserDataDirs();
   await wipeTransientSessionData();
+  getTerminalKubeconfigs().sweepStale();
 
   ensureUserCssTemplate();
   loadPreferences();
@@ -1958,6 +1934,7 @@ app.on('before-quit', () => {
   }
   portForwards.clear();
   trustedFileTransferSenders.clear();
+  terminalKubeconfigs?.cleanupAll();
   wipeTransientUserDataDirs();
   void wipeTransientSessionData();
   stopDaemon();
