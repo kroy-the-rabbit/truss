@@ -1,15 +1,29 @@
-import { app, BrowserWindow, crashReporter, dialog, ipcMain, Menu, nativeTheme, session, shell, clipboard } from 'electron';
+import { app, BrowserWindow, crashReporter, dialog, ipcMain, Menu, nativeTheme, powerMonitor, session, shell, clipboard } from 'electron';
 import { ChildProcess, spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { startDaemon, stopDaemon, DaemonConfig, enrichPath } from './daemon';
+import {
+  checkDaemonNow,
+  enrichPath,
+  getDaemonConfig,
+  getDaemonState,
+  startDaemonSupervisor,
+  stopDaemon,
+} from './daemon';
+import { Backoff } from './backoff';
+import {
+  classifyPortForwardStderr,
+  decidePortForwardExit,
+  findPortForwardMatch,
+  hasLiveProcess,
+  PORT_FORWARD_MAX_RESTARTS,
+} from './portForwardLogic';
 import { readPluginFileUtf8 } from './pluginFs';
 import { ApprovedRoots, assertInsideApprovedRoot } from './pathSafety';
 import { assertTrustedSender, installSecurityGuards } from './security';
 
 let mainWindow: BrowserWindow | null = null;
-let daemonConfig: DaemonConfig | null = null;
 let logsWindow: BrowserWindow | null = null;
 // Each exec session gets its own window, keyed by "context:namespace:pod:container".
 const execWindows = new Map<string, BrowserWindow>();
@@ -54,8 +68,16 @@ interface PortForwardRecord {
   stoppedAt?: string;
   pid?: number;
   message?: string;
+  lastError?: string;
   output: string;
   proc?: ChildProcess;
+  // Supervision: `wanted` is cleared on user stop / lock and never re-set.
+  wanted: boolean;
+  everRunning: boolean;
+  restartAttempts: number;
+  restartPending: boolean;
+  restartTimer?: NodeJS.Timeout;
+  runningSince?: number;
 }
 
 const portForwards = new Map<string, PortForwardRecord>();
@@ -510,7 +532,9 @@ ipcMain.handle('session-broadcast', (_event, type: string) => {
   if (type === 'locked') {
     sessionLocked = true;
     for (const pf of portForwards.values()) {
-      if (pf.status === 'running' || pf.status === 'starting') {
+      const wasPending = pf.restartPending;
+      cancelPortForwardSupervision(pf);
+      if (pf.status === 'running' || pf.status === 'starting' || wasPending) {
         stopPortForwardSession(pf);
         pf.status = 'stopped';
         pf.stoppedAt = new Date().toISOString();
@@ -860,33 +884,20 @@ ipcMain.handle('port-forward-start', (_event, opts: Record<string, unknown>) => 
     throw new Error('Invalid port forward parameters');
   }
 
-  const existing = Array.from(portForwards.values()).find(
-    (p) =>
-      p.context === context &&
-      p.namespace === namespace &&
-      p.targetType === targetType &&
-      p.targetName === targetName &&
-      p.localPort === localPort &&
-      p.targetPort === targetPort &&
-      (p.status === 'starting' || p.status === 'running'),
-  );
-  if (existing) {
-    return sanitizePortForward(existing);
+  const spec = { context, namespace, targetType, targetName, localPort, targetPort } as const;
+  const match = findPortForwardMatch(portForwards.values(), spec);
+  if (match?.kind === 'duplicate') {
+    return sanitizePortForward(match.record);
+  }
+  if (match?.kind === 'port-conflict') {
+    throw new Error(`Local port ${localPort} is already used by another port-forward`);
+  }
+  // Older dead records for the same local port must not be revived on resume.
+  for (const p of portForwards.values()) {
+    if (p.localPort === localPort) cancelPortForwardSupervision(p);
   }
 
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  const targetRef = `${targetType === 'service' ? 'svc' : 'pod'}/${targetName}`;
-  const args = ['port-forward', '-n', namespace, targetRef, `${localPort}:${targetPort}`];
-  if (context) args.push('--context', context);
-
-  const proc = spawn('kubectl', args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      PATH: enrichPath(preferences.execPathHints),
-    },
-  });
-
   const rec: PortForwardRecord = {
     id,
     context,
@@ -897,18 +908,46 @@ ipcMain.handle('port-forward-start', (_event, opts: Record<string, unknown>) => 
     targetPort,
     status: 'starting',
     startedAt: new Date().toISOString(),
-    pid: proc.pid,
     output: '',
-    proc,
+    wanted: true,
+    everRunning: false,
+    restartAttempts: 0,
+    restartPending: false,
   };
   portForwards.set(id, rec);
+  spawnPortForwardProcess(rec);
+
+  return sanitizePortForward(rec);
+});
+
+const portForwardBackoffs = new Map<string, Backoff>();
+const PORT_FORWARD_HEALTHY_RESET_MS = 60_000;
+
+function spawnPortForwardProcess(rec: PortForwardRecord) {
+  const targetRef = `${rec.targetType === 'service' ? 'svc' : 'pod'}/${rec.targetName}`;
+  const args = ['port-forward', '-n', rec.namespace, targetRef, `${rec.localPort}:${rec.targetPort}`];
+  if (rec.context) args.push('--context', rec.context);
+
+  const proc = spawn('kubectl', args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      PATH: enrichPath(preferences.execPathHints),
+    },
+  });
+  rec.proc = proc;
+  rec.pid = proc.pid;
+  rec.status = 'starting';
+  rec.stoppedAt = undefined;
 
   proc.stdout.on('data', (buf) => {
     const line = String(buf);
     rec.output = trimPortForwardOutput(rec.output + line);
-    if (rec.status === 'starting' && line.toLowerCase().includes('forwarding from')) {
+    if (rec.proc === proc && rec.status === 'starting' && line.toLowerCase().includes('forwarding from')) {
       rec.status = 'running';
-      rec.message = 'Forwarding';
+      rec.everRunning = true;
+      rec.runningSince = Date.now();
+      rec.message = rec.restartAttempts > 0 ? 'Forwarding (reconnected)' : 'Forwarding';
     }
   });
 
@@ -916,44 +955,105 @@ ipcMain.handle('port-forward-start', (_event, opts: Record<string, unknown>) => 
     const line = String(buf);
     rec.output = trimPortForwardOutput(rec.output + line);
     const msg = line.trim();
-    if (msg) {
-      rec.message = msg;
-    }
-    if (rec.status === 'starting') {
-      rec.status = 'error';
-      rec.message = derivePortForwardMessage(rec.output, msg || 'Port-forward failed');
-    } else if (
-      line.toLowerCase().includes('error occurred forwarding') ||
-      line.toLowerCase().includes('lost connection to pod')
-    ) {
-      rec.status = 'error';
-      rec.message = derivePortForwardMessage(rec.output, msg || 'Port-forward failed');
-    }
+    if (!msg) return;
+    // Per-connection errors ("error occurred forwarding ...") don't stop
+    // kubectl; only the process exiting changes the status.
+    const kind = classifyPortForwardStderr(msg);
+    rec.lastError = derivePortForwardMessage(msg, msg);
+    if (kind === 'other') rec.message = rec.lastError;
   });
+
+  let finished = false;
+  const onFinished = (fallback: string) => {
+    if (finished) return;
+    finished = true;
+    if (rec.proc !== proc) return;
+    rec.proc = undefined;
+    rec.stoppedAt = new Date().toISOString();
+    // A forward that ran healthily for a while gets a fresh restart budget.
+    if (rec.runningSince !== undefined && Date.now() - rec.runningSince >= PORT_FORWARD_HEALTHY_RESET_MS) {
+      rec.restartAttempts = 0;
+      portForwardBackoffs.get(rec.id)?.reset();
+    }
+    rec.runningSince = undefined;
+    const decision = decidePortForwardExit({
+      wanted: rec.wanted,
+      everRunning: rec.everRunning,
+      restartAttempts: rec.restartAttempts,
+    });
+    if (decision === 'stopped') {
+      rec.status = 'stopped';
+      return;
+    }
+    if (decision === 'error') {
+      rec.status = 'error';
+      rec.message = derivePortForwardMessage(rec.output, rec.lastError || fallback);
+      if (!rec.everRunning) rec.wanted = false;
+      return;
+    }
+    schedulePortForwardRestart(rec);
+  };
 
   proc.on('error', (err) => {
-    rec.status = 'error';
-    rec.message = String(err.message || err);
-    rec.stoppedAt = new Date().toISOString();
-    rec.proc = undefined;
+    rec.lastError = String(err.message || err);
+    onFinished(rec.lastError);
   });
 
-  proc.on('close', (code) => {
-    if (rec.status !== 'error') {
-      rec.status = code === 0 ? 'stopped' : 'error';
-      const fallback = code === 0 ? 'Stopped' : `Exited with code ${String(code)}`;
-      rec.message = derivePortForwardMessage(rec.output, fallback);
+  proc.on('close', (code, signal) => {
+    onFinished(signal ? `Exited with signal ${signal}` : `Exited with code ${String(code)}`);
+  });
+}
+
+function schedulePortForwardRestart(rec: PortForwardRecord) {
+  let backoff = portForwardBackoffs.get(rec.id);
+  if (!backoff) {
+    backoff = new Backoff();
+    portForwardBackoffs.set(rec.id, backoff);
+  }
+  const delay = backoff.next();
+  rec.restartAttempts += 1;
+  rec.status = 'starting';
+  rec.restartPending = true;
+  rec.message = `Reconnecting (attempt ${rec.restartAttempts}/${PORT_FORWARD_MAX_RESTARTS})`;
+  rec.restartTimer = setTimeout(() => {
+    rec.restartTimer = undefined;
+    rec.restartPending = false;
+    if (!rec.wanted || sessionLocked) {
+      rec.status = 'stopped';
+      return;
     }
-    rec.stoppedAt = new Date().toISOString();
-    rec.proc = undefined;
-  });
+    spawnPortForwardProcess(rec);
+  }, delay);
+}
 
-  return sanitizePortForward(rec);
-});
+/** Stop any pending/future auto-restart. Used for user stop, lock and quit. */
+function cancelPortForwardSupervision(rec: PortForwardRecord) {
+  rec.wanted = false;
+  if (rec.restartTimer) clearTimeout(rec.restartTimer);
+  rec.restartTimer = undefined;
+  rec.restartPending = false;
+  portForwardBackoffs.delete(rec.id);
+}
+
+/** After sleep/unlock: restart forwards the user still wants whose kubectl died. */
+function revivePortForwardsAfterResume() {
+  if (sessionLocked) return;
+  for (const rec of portForwards.values()) {
+    if (!rec.wanted || !rec.everRunning || hasLiveProcess(rec)) continue;
+    if (rec.restartTimer) clearTimeout(rec.restartTimer);
+    rec.restartTimer = undefined;
+    rec.restartPending = false;
+    rec.restartAttempts = 0;
+    portForwardBackoffs.get(rec.id)?.reset();
+    rec.message = 'Reconnecting after resume';
+    spawnPortForwardProcess(rec);
+  }
+}
 
 ipcMain.handle('port-forward-stop', (_event, id: string) => {
   const rec = portForwards.get(String(id));
   if (!rec) return { ok: false };
+  cancelPortForwardSupervision(rec);
   stopPortForwardSession(rec);
   rec.status = 'stopped';
   rec.stoppedAt = new Date().toISOString();
@@ -974,8 +1074,28 @@ ipcMain.handle('port-forward-open-url', (_event, id: string) => {
 // Handle daemon config requests from renderer.
 ipcMain.handle('get-daemon-config', (event) => {
   assertTrustedSender(event);
-  return daemonConfig;
+  return getDaemonConfig();
 });
+
+ipcMain.handle('get-daemon-state', (event) => {
+  assertTrustedSender(event);
+  return getDaemonState();
+});
+
+/** Send an IPC event to every open window (main, logs, exec, file transfer, port-forward, popouts). */
+function broadcastToAllWindows(channel: string, ...args: unknown[]) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) continue;
+    win.webContents.send(channel, ...args);
+  }
+}
+
+function handleSystemResume(reason: string) {
+  console.log(`System ${reason}: re-checking daemon and port-forwards`);
+  checkDaemonNow();
+  revivePortForwardsAfterResume();
+  broadcastToAllWindows('system-resume');
+}
 
 ipcMain.handle('get-preferences', () => ({
   themeMode: preferences.themeMode,
@@ -1186,7 +1306,7 @@ function stopPortForwardSession(rec: PortForwardRecord) {
   }
   setTimeout(() => {
     try {
-      if (!p.killed) p.kill('SIGKILL');
+      if (p.exitCode === null && p.signalCode === null) p.kill('SIGKILL');
     } catch {
       // Ignore process kill errors.
     }
@@ -1666,13 +1786,16 @@ app.whenReady().then(async () => {
     }
   });
 
-  try {
-    console.log('Starting trussd daemon...');
-    daemonConfig = await startDaemon({ pathHints: preferences.execPathHints });
-    console.log(`Daemon running on port ${daemonConfig.port}`);
-  } catch (err) {
-    console.error('Failed to start daemon:', err);
-  }
+  console.log('Starting trussd daemon...');
+  // Resolves after the first attempt; on failure the supervisor keeps retrying
+  // with backoff and windows learn about it through 'daemon-state'.
+  await startDaemonSupervisor(
+    () => ({ pathHints: preferences.execPathHints }),
+    (state) => broadcastToAllWindows('daemon-state', state),
+  );
+
+  powerMonitor.on('resume', () => handleSystemResume('resume'));
+  powerMonitor.on('unlock-screen', () => handleSystemResume('unlock-screen'));
 
   await createWindow();
 
@@ -1727,6 +1850,7 @@ app.on('before-quit', () => {
   }
   portForwardWindow = null;
   for (const pf of portForwards.values()) {
+    cancelPortForwardSupervision(pf);
     stopPortForwardSession(pf);
   }
   portForwards.clear();

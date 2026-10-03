@@ -79,6 +79,9 @@ export async function installElectronApiMock(page: Page) {
 
     (window as any).electronAPI = {
       getDaemonConfig: async () => ({ port: daemonPort, token: 'test-token' }),
+      getDaemonState: async () => ({ status: 'ready', epoch: 1 }),
+      onDaemonState: () => noopUnsub,
+      onSystemResume: () => noopUnsub,
       getPreferences: async () => prefs,
       onThemeUpdated: () => noopUnsub,
       getAppInfo: async () => ({ name: 'Truss', version: 'test' }),

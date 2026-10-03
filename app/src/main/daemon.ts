@@ -3,6 +3,7 @@ import path from 'path';
 import { app } from 'electron';
 import http from 'http';
 import { getLoginShellEnv, mergeShellEnv } from './shellEnv';
+import { DaemonHandle, DaemonStatePayload, DaemonSupervisor } from './daemonSupervisor';
 
 export interface DaemonConfig {
   port: number;
@@ -13,7 +14,7 @@ export interface StartDaemonOptions {
   pathHints?: string[];
 }
 
-let daemonProcess: ChildProcess | null = null;
+let supervisor: DaemonSupervisor<DaemonConfig> | null = null;
 
 function findDaemonBinary(): string {
   const binaryName = process.platform === 'win32' ? 'trussd.exe' : 'trussd';
@@ -68,7 +69,26 @@ export function enrichPath(pathHints: string[] = []): string {
   return `${current}${delimiter}${additions.join(delimiter)}`;
 }
 
-export async function startDaemon(opts?: StartDaemonOptions): Promise<DaemonConfig> {
+function killWithEscalation(child: ChildProcess): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    child.kill('SIGTERM');
+  } catch {
+    return;
+  }
+  const t = setTimeout(() => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // Ignore kill failures.
+    }
+  }, 3000);
+  t.unref?.();
+}
+
+/** Spawn trussd once and wait until it answers health pings. */
+export async function launchDaemon(opts?: StartDaemonOptions): Promise<DaemonHandle<DaemonConfig>> {
   const binary = findDaemonBinary();
   const shellEnv = await getLoginShellEnv();
 
@@ -83,15 +103,22 @@ export async function startDaemon(opts?: StartDaemonOptions): Promise<DaemonConf
       process.platform === 'win32' ? ';' : ':',
     );
 
-    const child = spawn(binary, [], {
+    // stdin is a pipe we never write to: when Electron dies (even SIGKILL) the
+    // write end closes and trussd sees EOF and exits (--exit-on-stdin-eof).
+    const child = spawn(binary, ['--exit-on-stdin-eof'], {
       env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     startupProcess = child;
+    // Swallow EPIPE etc. on the parent-death pipe; the child handle keeps it referenced.
+    child.stdin?.on('error', () => {});
 
     let stdout = '';
     let port: number | null = null;
     let token: string | null = null;
+    let healthStarted = false;
+    let exitReason: string | null = null;
+    const exitListeners: Array<(reason: string) => void> = [];
 
     const clearTimer = () => {
       if (startupTimer) {
@@ -121,7 +148,8 @@ export async function startDaemon(opts?: StartDaemonOptions): Promise<DaemonConf
     };
 
     const maybeResolve = () => {
-      if (settled || port === null || !token) return;
+      if (settled || healthStarted || port === null || !token) return;
+      healthStarted = true;
       const resolvedPort = port;
       const resolvedToken = token;
       waitForHealth(resolvedPort, resolvedToken)
@@ -129,9 +157,20 @@ export async function startDaemon(opts?: StartDaemonOptions): Promise<DaemonConf
           if (settled) return;
           settled = true;
           clearTimer();
-          daemonProcess = child;
           startupProcess = null;
-          resolve({ port: resolvedPort, token: resolvedToken });
+          resolve({
+            config: { port: resolvedPort, token: resolvedToken },
+            onExit(cb) {
+              if (exitReason !== null) {
+                cb(exitReason);
+                return;
+              }
+              exitListeners.push(cb);
+            },
+            kill() {
+              killWithEscalation(child);
+            },
+          });
         })
         .catch((err) => rejectOnce(err instanceof Error ? err : new Error(String(err))));
     };
@@ -155,19 +194,20 @@ export async function startDaemon(opts?: StartDaemonOptions): Promise<DaemonConf
       console.error(`[trussd] ${data.toString()}`);
     });
 
+    const notifyExit = (reason: string) => {
+      if (exitReason !== null) return;
+      exitReason = reason;
+      for (const cb of exitListeners.splice(0)) cb(reason);
+    };
+
     child.on('error', (err) => {
-      if (daemonProcess === child) {
-        daemonProcess = null;
-      }
       startupProcess = null;
       rejectOnce(new Error(`Failed to start daemon: ${err.message}`));
     });
 
-    child.on('exit', (code) => {
-      if (daemonProcess === child) {
-        daemonProcess = null;
-      }
+    child.on('exit', (code, signal) => {
       startupProcess = null;
+      notifyExit(signal ? `signal ${signal}` : `code ${code}`);
       if (settled) return;
       if (code === 0) {
         rejectOnce(new Error('Daemon exited before startup completed'));
@@ -186,7 +226,7 @@ export async function startDaemon(opts?: StartDaemonOptions): Promise<DaemonConf
 async function waitForHealth(port: number, token: string, retries = 20): Promise<void> {
   for (let i = 0; i < retries; i++) {
     try {
-      await pingDaemon(port, token);
+      await pingDaemon(port, token, 2000);
       return;
     } catch {
       await new Promise((r) => setTimeout(r, 250));
@@ -195,7 +235,7 @@ async function waitForHealth(port: number, token: string, retries = 20): Promise
   throw new Error('Daemon health check failed');
 }
 
-function pingDaemon(port: number, token: string): Promise<void> {
+export function pingDaemon(port: number, token: string, timeoutMs = 2000): Promise<void> {
   return new Promise((resolve, reject) => {
     const postData = '{}';
     const req = http.request(
@@ -211,6 +251,7 @@ function pingDaemon(port: number, token: string): Promise<void> {
         },
       },
       (res) => {
+        res.resume();
         if (res.statusCode === 200) {
           resolve();
         } else {
@@ -218,15 +259,54 @@ function pingDaemon(port: number, token: string): Promise<void> {
         }
       },
     );
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Health check timed out after ${timeoutMs}ms`));
+    });
     req.on('error', reject);
     req.write(postData);
     req.end();
   });
 }
 
+/**
+ * Start supervising trussd. Resolves after the first launch attempt settles;
+ * on failure the supervisor keeps retrying in the background with backoff.
+ * `getOptions` is re-read on every (re)start so updated PATH hints apply.
+ */
+export async function startDaemonSupervisor(
+  getOptions: () => StartDaemonOptions,
+  onState: (state: DaemonStatePayload, config: DaemonConfig | null) => void,
+): Promise<void> {
+  if (supervisor) return;
+  supervisor = new DaemonSupervisor<DaemonConfig>({
+    launch: () => launchDaemon(getOptions()),
+    ping: (cfg, timeoutMs) => pingDaemon(cfg.port, cfg.token, timeoutMs),
+    onState: (state, config) => {
+      if (state.status === 'ready' && config) {
+        console.log(`Daemon ready on port ${config.port} (epoch ${state.epoch})`);
+      } else if (state.error) {
+        console.error(`Daemon ${state.status}: ${state.error}`);
+      }
+      onState(state, config);
+    },
+  });
+  await supervisor.start();
+}
+
+export function getDaemonState(): DaemonStatePayload {
+  return supervisor ? supervisor.getState() : { status: 'starting', epoch: 0 };
+}
+
+export function getDaemonConfig(): DaemonConfig | null {
+  return supervisor ? supervisor.getConfig() : null;
+}
+
+/** Trigger an immediate health ping (or a pending restart), e.g. after resume. */
+export function checkDaemonNow(): void {
+  supervisor?.checkNow();
+}
+
+/** Intentional stop: the supervisor will not restart the daemon. */
 export function stopDaemon(): void {
-  if (daemonProcess) {
-    daemonProcess.kill('SIGTERM');
-    daemonProcess = null;
-  }
+  supervisor?.stop();
 }

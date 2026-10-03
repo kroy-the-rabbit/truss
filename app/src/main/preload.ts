@@ -3,6 +3,24 @@ import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('electronAPI', {
   getAppInfo: () => ipcRenderer.invoke('get-app-info'),
   getDaemonConfig: () => ipcRenderer.invoke('get-daemon-config'),
+  getDaemonState: () => ipcRenderer.invoke('get-daemon-state'),
+  onDaemonState: (callback: (state: {
+    status: 'starting' | 'ready' | 'restarting' | 'failed';
+    epoch: number;
+    error?: string;
+  }) => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      state: { status: 'starting' | 'ready' | 'restarting' | 'failed'; epoch: number; error?: string },
+    ) => callback(state);
+    ipcRenderer.on('daemon-state', handler);
+    return () => ipcRenderer.removeListener('daemon-state', handler);
+  },
+  onSystemResume: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on('system-resume', handler);
+    return () => ipcRenderer.removeListener('system-resume', handler);
+  },
   getPreferences: () => ipcRenderer.invoke('get-preferences'),
   setExecPathHints: (pathHints: string[]) => ipcRenderer.invoke('set-exec-path-hints', pathHints),
   setEventSuppressionRules: (rules: string[]) => ipcRenderer.invoke('set-event-suppression-rules', rules),
