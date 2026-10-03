@@ -938,9 +938,21 @@ ipcMain.handle('set-event-suppression-rules', (_event, rules: unknown) => {
   return { eventSuppressionRules: preferences.eventSuppressionRules };
 });
 
+// Release builds record the full version (e.g. 0.97.53d0115) as trussVersion,
+// because package.json's version must be semver (0.97.0).
+function displayVersion(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8')) as { trussVersion?: unknown };
+    if (typeof pkg.trussVersion === 'string' && pkg.trussVersion) return pkg.trussVersion;
+  } catch {
+    // fall back to the semver version
+  }
+  return app.getVersion();
+}
+
 ipcMain.handle('get-app-info', () => ({
   name: app.getName(),
-  version: app.getVersion(),
+  version: displayVersion(),
 }));
 
 ipcMain.handle('set-theme-mode', (_event, mode: unknown, tone?: unknown) => {
