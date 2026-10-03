@@ -1095,9 +1095,6 @@ func convertToProto(obj *unstructured.Unstructured, kind string, summaryFields [
 	}
 }
 
-//go:fix inline
-func boolPtr(b bool) *bool { return new(b) }
-
 func buildContainerInfo(name, image string, isInit bool, status corev1.ContainerStatus) *pb.ContainerInfo {
 	info := &pb.ContainerInfo{
 		Name:         name,
@@ -1420,14 +1417,12 @@ func (s *Server) handleExecWS(_ string) http.HandlerFunc {
 			return
 		}
 
-		if execErr != nil {
-			msg := fmt.Sprintf("exec failed: %v", execErr)
-			_ = conn.Write(wsCtx, websocket.MessageText, []byte("\r\n["+msg+"]\r\n"))
-			if len(msg) > 120 {
-				msg = msg[:120]
-			}
-			_ = conn.Close(websocket.StatusInternalError, msg)
+		msg := fmt.Sprintf("exec failed: %v", execErr)
+		_ = conn.Write(wsCtx, websocket.MessageText, []byte("\r\n["+msg+"]\r\n"))
+		if len(msg) > 120 {
+			msg = msg[:120]
 		}
+		_ = conn.Close(websocket.StatusInternalError, msg)
 	}
 }
 
