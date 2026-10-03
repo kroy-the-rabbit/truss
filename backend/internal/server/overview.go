@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
 	"connectrpc.com/connect"
+	"github.com/kroy/truss/backend/internal/kube"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -33,7 +36,7 @@ func (s *Server) GetClusterOverview(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 	ns := req.Msg.Namespace
 	resp := &pb.GetClusterOverviewResponse{}
@@ -49,9 +52,15 @@ func (s *Server) GetClusterOverview(
 
 	// listFrom tries the watchcache first; on miss falls back to direct API and
 	// warms the cache in the background. Returns items and whether cache was warm.
+	// contextErr records the first context-level failure (auth/network/TLS, or
+	// any non-RBAC node list failure) so the overview reports it instead of zeros.
+	var contextErr error
 	listFrom := func(gvr schema.GroupVersionResource, listNS string) ([]unstructured.Unstructured, bool) {
 		if items, synced := s.watchCache.ListAll(ctxName, gvr, listNS); synced {
 			return items, true
+		}
+		if contextErr != nil {
+			return nil, false
 		}
 		go s.ensureWatchCache(ctxName, cs)
 		var listErr error
@@ -62,6 +71,13 @@ func (s *Server) GetClusterOverview(
 			list, listErr = cs.Dynamic.Resource(gvr).Namespace(listNS).List(ctx, metav1.ListOptions{})
 		}
 		if listErr != nil {
+			switch k := kube.Classify(listErr); {
+			case k.IsAuth(), k == kube.KindUnreachable, k == kube.KindTLS:
+				contextErr = listErr
+			}
+			if gvr == nodeGVR && !apierrors.IsForbidden(listErr) {
+				contextErr = listErr
+			}
 			return nil, false
 		}
 		return list.Items, false
@@ -69,6 +85,9 @@ func (s *Server) GetClusterOverview(
 
 	// Nodes are always cluster-scoped (ns=""). Keep items for allocatable map.
 	nodeItems, nodeWarm := listFrom(nodeGVR, "")
+	if contextErr != nil {
+		return nil, s.toConnectError(ctxName, fmt.Errorf("listing nodes: %w", contextErr))
+	}
 	if !nodeWarm {
 		allWarm = false
 	}
@@ -109,6 +128,9 @@ func (s *Server) GetClusterOverview(
 		resp.RecentWarnings = extractWarningEvents(evtItems, 10)
 	}
 
+	if contextErr != nil {
+		return nil, s.toConnectError(ctxName, contextErr)
+	}
 	resp.CacheWarm = allWarm
 
 	// Metrics from metrics-server — direct List() only (metrics-server has no watch support).

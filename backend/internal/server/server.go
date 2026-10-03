@@ -41,7 +41,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
 	"sigs.k8s.io/yaml"
 
@@ -74,7 +73,7 @@ func New(kubeMgr *kube.Manager, store *contextstore.Store, version string) *Serv
 		discoveryCache: disc.NewCache(),
 		version:        version,
 		searchIndexes:  make(map[string]*searchIndexState),
-		watchCache:     watchcache.New(),
+		watchCache:     newHealthAwareWatchCache(kubeMgr),
 	}
 	// The daemon always starts read-only; the UI must opt in to write mode.
 	s.SetReadOnly(true)
@@ -116,6 +115,8 @@ func (s *Server) newMux(token string) *http.ServeMux {
 	mux.HandleFunc("/api/setup/preferences/auto-lock", s.handleSetupAutoLockSet)
 	mux.HandleFunc("/api/setup/preferences/never-confirm-bypass", s.handleSetupNeverConfirmBypassSet)
 	mux.HandleFunc("/api/context-preflight", s.handleContextPreflight)
+	mux.HandleFunc("/api/context-health", s.handleContextHealth)
+	mux.HandleFunc("/api/contexts/reauth", s.handleContextReauth)
 	mux.HandleFunc("/api/setup/reset", s.handleSetupReset)
 	mux.HandleFunc("/api/gpg-keys", s.handleGPGKeys)
 	mux.HandleFunc("/api/kubeconfig-contexts", s.handleKubeconfigContexts)
@@ -227,10 +228,14 @@ func (s *Server) resolveContext(ctx string) string {
 // ensureWatchCache discovers GVRs and starts informers for a context. Idempotent.
 func (s *Server) ensureWatchCache(ctxName string, cs *kube.ClientSet) {
 	resources, err := s.discoveryCache.Discover(ctxName, cs.Discovery, false)
-	if err != nil || len(resources) == 0 {
+	if err != nil {
+		s.kubeMgr.RecordError(ctxName, err)
 		return
 	}
-	s.watchCache.EnsureStarted(ctxName, cs.Dynamic, resources)
+	if len(resources) == 0 {
+		return
+	}
+	s.watchCache.EnsureStarted(ctxName, cs.InformerClient(), resources)
 }
 
 // --- HealthService ---
@@ -293,12 +298,12 @@ func (s *Server) ListNamespaces(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	nsList, err := cs.Clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("listing namespaces: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("listing namespaces: %w", err))
 	}
 
 	var namespaces []*pb.Namespace
@@ -320,12 +325,12 @@ func (s *Server) ListResourceKinds(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	resources, err := s.discoveryCache.Discover(ctxName, cs.Discovery, false)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("discovering resources: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("discovering resources: %w", err))
 	}
 
 	groupMap := make(map[string]*pb.ResourceGroup)
@@ -376,7 +381,7 @@ func (s *Server) ListResources(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -399,7 +404,7 @@ func (s *Server) ListResources(
 			list, err = cs.Dynamic.Resource(gvr).Namespace(ns).List(ctx, metav1.ListOptions{})
 		}
 		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("listing resources: %w", err))
+			return nil, s.toConnectError(ctxName, fmt.Errorf("listing resources: %w", err))
 		}
 		items = list.Items
 		// Ensure informers are running so the next call will be served from cache.
@@ -518,7 +523,7 @@ func (s *Server) GetResource(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -535,7 +540,7 @@ func (s *Server) GetResource(
 		obj, err = cs.Dynamic.Resource(gvr).Namespace(ns).Get(ctx, req.Msg.Name, metav1.GetOptions{})
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting resource: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting resource: %w", err), connect.CodeNotFound)
 	}
 
 	kind := obj.GetKind()
@@ -554,7 +559,7 @@ func (s *Server) DeleteResource(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -575,7 +580,7 @@ func (s *Server) DeleteResource(
 		err = cs.Dynamic.Resource(gvr).Namespace(ns).Delete(ctx, req.Msg.Name, deleteOpts)
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("deleting resource: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("deleting resource: %w", err))
 	}
 
 	return connect.NewResponse(&pb.DeleteResourceResponse{
@@ -591,7 +596,7 @@ func (s *Server) ScaleResource(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -607,14 +612,14 @@ func (s *Server) ScaleResource(
 	// Get current state to read previous replicas.
 	current, err := cs.Dynamic.Resource(gvr).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting resource: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting resource: %w", err), connect.CodeNotFound)
 	}
 	prevReplicas, _, _ := unstructured.NestedInt64(current.Object, "spec", "replicas")
 
 	patch := fmt.Appendf(nil, `{"spec":{"replicas":%d}}`, replicas)
 	_, err = cs.Dynamic.Resource(gvr).Namespace(ns).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("scaling resource: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("scaling resource: %w", err))
 	}
 
 	return connect.NewResponse(&pb.ScaleResourceResponse{
@@ -632,7 +637,7 @@ func (s *Server) RestartResource(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -650,7 +655,7 @@ func (s *Server) RestartResource(
 	)
 	_, err = cs.Dynamic.Resource(gvr).Namespace(ns).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("restarting resource: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("restarting resource: %w", err))
 	}
 
 	return connect.NewResponse(&pb.RestartResourceResponse{
@@ -666,7 +671,7 @@ func (s *Server) GetResourceCounts(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	ns := req.Msg.Namespace
@@ -746,13 +751,13 @@ func (s *Server) GetOwnedPods(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	// Resolve kind → GVR via discovery cache.
 	resources, err := s.discoveryCache.Discover(ctxName, cs.Discovery, false)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("discovering resources: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("discovering resources: %w", err))
 	}
 
 	var gvr schema.GroupVersionResource
@@ -775,7 +780,7 @@ func (s *Server) GetOwnedPods(
 	// Get the workload object.
 	obj, err := cs.Dynamic.Resource(gvr).Namespace(req.Msg.Namespace).Get(ctx, req.Msg.Name, metav1.GetOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting resource: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting resource: %w", err), connect.CodeNotFound)
 	}
 
 	// Extract spec.selector.matchLabels.
@@ -798,7 +803,7 @@ func (s *Server) GetOwnedPods(
 		LabelSelector: selectorStr,
 	})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("listing pods: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("listing pods: %w", err))
 	}
 
 	var pods []*pb.Resource
@@ -824,7 +829,7 @@ func (s *Server) GetYaml(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -841,7 +846,7 @@ func (s *Server) GetYaml(
 		obj, err = cs.Dynamic.Resource(gvr).Namespace(ns).Get(ctx, req.Msg.Name, metav1.GetOptions{})
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting resource: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting resource: %w", err), connect.CodeNotFound)
 	}
 
 	// Remove managedFields for cleaner YAML output.
@@ -862,7 +867,7 @@ func (s *Server) ApplyYaml(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	var obj unstructured.Unstructured
@@ -874,7 +879,7 @@ func (s *Server) ApplyYaml(
 	// We need to find the resource name (plural) for this GVK.
 	resources, err := s.discoveryCache.Discover(ctxName, cs.Discovery, false)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	var gvr schema.GroupVersionResource
@@ -922,7 +927,7 @@ func (s *Server) ApplyYaml(
 		)
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("applying: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("applying: %w", err))
 	}
 
 	result.SetManagedFields(nil)
@@ -942,7 +947,7 @@ func (s *Server) DiffYaml(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -959,7 +964,7 @@ func (s *Server) DiffYaml(
 		obj, err = cs.Dynamic.Resource(gvr).Namespace(ns).Get(ctx, req.Msg.Name, metav1.GetOptions{})
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting resource: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting resource: %w", err), connect.CodeNotFound)
 	}
 
 	obj.SetManagedFields(nil)
@@ -1131,7 +1136,7 @@ func (s *Server) ListEvents(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	ns := req.Msg.Namespace
@@ -1142,7 +1147,7 @@ func (s *Server) ListEvents(
 		eventList, err = cs.Clientset.CoreV1().Events(ns).List(ctx, metav1.ListOptions{})
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("listing events: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("listing events: %w", err))
 	}
 
 	var events []*pb.EventItem
@@ -1196,13 +1201,13 @@ func (s *Server) GetLogs(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	// List containers in the pod.
 	pod, err := cs.Clientset.CoreV1().Pods(req.Msg.Namespace).Get(ctx, req.Msg.Pod, metav1.GetOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting pod: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting pod: %w", err), connect.CodeNotFound)
 	}
 
 	var containers []string
@@ -1249,13 +1254,13 @@ func (s *Server) GetLogs(
 	logReq := cs.Clientset.CoreV1().Pods(req.Msg.Namespace).GetLogs(req.Msg.Pod, opts)
 	stream, err := logReq.Stream(ctx)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("streaming logs: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("streaming logs: %w", err))
 	}
 	defer stream.Close()
 
 	logBytes, err := io.ReadAll(io.LimitReader(stream, 5*1024*1024)) // 5MB limit
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("reading logs: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("reading logs: %w", err))
 	}
 
 	return connect.NewResponse(&pb.GetLogsResponse{
@@ -1275,12 +1280,12 @@ func (s *Server) GetPodInfo(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	pod, err := cs.Clientset.CoreV1().Pods(req.Msg.Namespace).Get(ctx, req.Msg.Pod, metav1.GetOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting pod: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting pod: %w", err), connect.CodeNotFound)
 	}
 
 	initStatusMap := make(map[string]corev1.ContainerStatus)
@@ -1440,8 +1445,16 @@ func (s *Server) handleWatchWS(_ string) http.HandlerFunc {
 		}
 		nsFilter := strings.TrimSpace(r.URL.Query().Get("namespace"))
 
+		if h, blocked := s.authBlockedHealth(ctxName); blocked {
+			writeAuthBlocked(w, h)
+			return
+		}
 		cs, err := s.kubeMgr.GetClientSet(ctxName)
 		if err != nil {
+			if h, blocked := s.authBlockedHealth(ctxName); blocked {
+				writeAuthBlocked(w, h)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1465,6 +1478,9 @@ func (s *Server) handleWatchWS(_ string) http.HandlerFunc {
 		}
 		defer conn.Close(websocket.StatusNormalClosure, "")
 
+		healthCh, healthCancel := s.kubeMgr.SubscribeHealth()
+		defer healthCancel()
+
 		wsCtx := r.Context()
 		ping := time.NewTicker(20 * time.Second)
 		defer ping.Stop()
@@ -1480,6 +1496,16 @@ func (s *Server) handleWatchWS(_ string) http.HandlerFunc {
 				return
 			case <-ping.C:
 				if err := conn.Write(wsCtx, websocket.MessageText, []byte(`{"type":"ping"}`)); err != nil {
+					return
+				}
+			case h, ok := <-healthCh:
+				if !ok {
+					return
+				}
+				if h.Context != ctxName {
+					continue
+				}
+				if err := conn.Write(wsCtx, websocket.MessageText, healthWatchMessage(h)); err != nil {
 					return
 				}
 			case ev, ok := <-ch:
@@ -1601,12 +1627,12 @@ func (s *Server) ListReleases(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	releases, err := helmclient.ListReleases(cs.Config, req.Msg.Namespace)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("listing helm releases: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("listing helm releases: %w", err))
 	}
 
 	var pbReleases []*pb.HelmRelease
@@ -1624,12 +1650,12 @@ func (s *Server) GetRelease(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	rel, err := helmclient.GetRelease(cs.Config, req.Msg.Namespace, req.Msg.Name)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting helm release: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting helm release: %w", err), connect.CodeNotFound)
 	}
 
 	return connect.NewResponse(&pb.GetReleaseResponse{Release: helmReleaseToPb(rel)}), nil
@@ -1642,12 +1668,12 @@ func (s *Server) GetReleaseValues(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	values, err := helmclient.GetValues(cs.Config, req.Msg.Namespace, req.Msg.Name)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("getting helm values: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("getting helm values: %w", err))
 	}
 
 	return connect.NewResponse(&pb.GetReleaseValuesResponse{ValuesYaml: values}), nil
@@ -1660,12 +1686,12 @@ func (s *Server) GetReleaseHistory(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	revisions, err := helmclient.GetHistory(cs.Config, req.Msg.Namespace, req.Msg.Name)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("getting helm history: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("getting helm history: %w", err))
 	}
 
 	var pbRevisions []*pb.ReleaseRevision
@@ -1690,11 +1716,11 @@ func (s *Server) UninstallRelease(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	if err := helmclient.Uninstall(cs.Config, req.Msg.Namespace, req.Msg.Name); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("uninstalling helm release: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("uninstalling helm release: %w", err))
 	}
 
 	return connect.NewResponse(&pb.UninstallReleaseResponse{
@@ -1710,11 +1736,11 @@ func (s *Server) RollbackRelease(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	if err := helmclient.Rollback(cs.Config, req.Msg.Namespace, req.Msg.Name, int(req.Msg.Revision)); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("rolling back helm release: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("rolling back helm release: %w", err))
 	}
 
 	return connect.NewResponse(&pb.RollbackReleaseResponse{
@@ -1730,11 +1756,11 @@ func (s *Server) UpgradeRelease(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	if err := helmclient.Upgrade(cs.Config, req.Msg.Namespace, req.Msg.Name, req.Msg.ValuesYaml); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("upgrading helm release: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("upgrading helm release: %w", err))
 	}
 
 	return connect.NewResponse(&pb.UpgradeReleaseResponse{
@@ -1750,13 +1776,13 @@ func (s *Server) CordonNode(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	patch := []byte(`{"spec":{"unschedulable":true}}`)
 	_, err = cs.Dynamic.Resource(nodeGVR).Patch(ctx, req.Msg.Name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("cordoning node: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("cordoning node: %w", err))
 	}
 
 	return connect.NewResponse(&pb.CordonNodeResponse{
@@ -1772,13 +1798,13 @@ func (s *Server) UncordonNode(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	patch := []byte(`{"spec":{"unschedulable":false}}`)
 	_, err = cs.Dynamic.Resource(nodeGVR).Patch(ctx, req.Msg.Name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("uncordoning node: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("uncordoning node: %w", err))
 	}
 
 	return connect.NewResponse(&pb.CordonNodeResponse{
@@ -1794,14 +1820,14 @@ func (s *Server) DrainNode(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	// Cordon first.
 	patch := []byte(`{"spec":{"unschedulable":true}}`)
 	_, err = cs.Dynamic.Resource(nodeGVR).Patch(ctx, req.Msg.Name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("cordoning node for drain: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("cordoning node for drain: %w", err))
 	}
 
 	// List all pods on this node.
@@ -1809,7 +1835,7 @@ func (s *Server) DrainNode(
 		FieldSelector: "spec.nodeName=" + req.Msg.Name,
 	})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("listing pods on node: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("listing pods on node: %w", err))
 	}
 
 	evictedCount := int32(0)
@@ -1860,13 +1886,13 @@ func (s *Server) TriggerCronJob(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting client: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting client: %w", err), connect.CodeNotFound)
 	}
 
 	cronGVR := schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "cronjobs"}
 	cj, err := cs.Dynamic.Resource(cronGVR).Namespace(req.Msg.Namespace).Get(ctx, req.Msg.Name, metav1.GetOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting cronjob: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting cronjob: %w", err), connect.CodeNotFound)
 	}
 
 	jobSpec, found, err := unstructured.NestedMap(cj.Object, "spec", "jobTemplate", "spec")
@@ -1908,7 +1934,7 @@ func (s *Server) TriggerCronJob(
 	jobGVR := schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
 	created, err := cs.Dynamic.Resource(jobGVR).Namespace(req.Msg.Namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("creating job: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("creating job: %w", err))
 	}
 
 	return connect.NewResponse(&pb.TriggerCronJobResponse{
@@ -2180,26 +2206,11 @@ func (s *Server) handleContextPreflight(w http.ResponseWriter, r *http.Request) 
 }
 
 func extractExecAuth(kubeconfigYAML string) (string, []string, error) {
-	cfg, err := clientcmd.Load([]byte(kubeconfigYAML))
-	if err != nil {
-		return "", nil, fmt.Errorf("parsing kubeconfig: %w", err)
+	execCfg, err := kube.ExecConfigFromKubeconfig(kubeconfigYAML)
+	if err != nil || execCfg == nil {
+		return "", nil, err
 	}
-	if cfg.CurrentContext == "" {
-		return "", nil, nil
-	}
-	ctx, ok := cfg.Contexts[cfg.CurrentContext]
-	if !ok || ctx == nil || strings.TrimSpace(ctx.AuthInfo) == "" {
-		return "", nil, nil
-	}
-	user, ok := cfg.AuthInfos[ctx.AuthInfo]
-	if !ok || user == nil || user.Exec == nil {
-		return "", nil, nil
-	}
-	command := strings.TrimSpace(user.Exec.Command)
-	if command == "" {
-		return "", nil, nil
-	}
-	return command, append([]string(nil), user.Exec.Args...), nil
+	return strings.TrimSpace(execCfg.Command), append([]string(nil), execCfg.Args...), nil
 }
 
 func resolveExecPath(command string) (string, bool) {

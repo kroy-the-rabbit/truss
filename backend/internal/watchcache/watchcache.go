@@ -1,6 +1,7 @@
 package watchcache
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -45,6 +46,36 @@ type ResourceEvent struct {
 type Manager struct {
 	mu       sync.RWMutex
 	contexts map[string]*contextCache
+
+	hooksMu      sync.RWMutex
+	unhealthy    func(contextName string) bool
+	onWatchError func(contextName string, err error)
+}
+
+// SetHealthHooks wires context health into the cache. unhealthy makes ListAll
+// report synced=false so callers fall back to the API (and surface the error)
+// instead of serving stale data; onWatchError receives informer list/watch errors.
+func (m *Manager) SetHealthHooks(unhealthy func(contextName string) bool, onWatchError func(contextName string, err error)) {
+	m.hooksMu.Lock()
+	defer m.hooksMu.Unlock()
+	m.unhealthy = unhealthy
+	m.onWatchError = onWatchError
+}
+
+func (m *Manager) isUnhealthy(contextName string) bool {
+	m.hooksMu.RLock()
+	fn := m.unhealthy
+	m.hooksMu.RUnlock()
+	return fn != nil && fn(contextName)
+}
+
+func (m *Manager) reportWatchError(contextName string, err error) {
+	m.hooksMu.RLock()
+	fn := m.onWatchError
+	m.hooksMu.RUnlock()
+	if fn != nil {
+		fn(contextName, err)
+	}
 }
 
 // New creates a new Manager.
@@ -75,6 +106,10 @@ func (m *Manager) EnsureStarted(contextName string, dynClient dynamic.Interface,
 		gvr := schema.GroupVersionResource{Group: r.Group, Version: r.Version, Resource: r.Resource}
 		if _, exists := cc.gvrs[gvr]; !exists {
 			inf := cc.factory.ForResource(gvr)
+			_ = inf.Informer().SetWatchErrorHandlerWithContext(func(ctx context.Context, r *kcache.Reflector, err error) {
+				m.reportWatchError(contextName, err)
+				kcache.DefaultWatchErrorHandler(ctx, r, err)
+			})
 			inf.Informer().AddEventHandler(kcache.ResourceEventHandlerFuncs{
 				AddFunc: func(obj any) {
 					m.broadcast(contextName, gvr, "add", obj)
@@ -177,6 +212,9 @@ func (m *Manager) Subscribe(contextName string) (<-chan ResourceEvent, func(), b
 // ListAll returns all items for the given GVR and namespace from the cache.
 // synced=false means the informer is not yet warm; the caller should fall back to the API.
 func (m *Manager) ListAll(contextName string, gvr schema.GroupVersionResource, namespace string) ([]unstructured.Unstructured, bool) {
+	if m.isUnhealthy(contextName) {
+		return nil, false
+	}
 	m.mu.RLock()
 	cc, ok := m.contexts[contextName]
 	m.mu.RUnlock()

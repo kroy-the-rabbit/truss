@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kroy/truss/backend/internal/kube"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -154,16 +155,18 @@ func (s *Server) triggerSearchIndexRefresh(contextName string) {
 func (s *Server) buildSearchIndex(contextName string) []searchIndexEntry {
 	cs, err := s.kubeMgr.GetClientSet(contextName)
 	if err != nil {
+		s.kubeMgr.RecordError(contextName, err)
 		return nil
 	}
 
 	resources, err := s.discoveryCache.Discover(contextName, cs.Discovery, false)
 	if err != nil {
+		s.kubeMgr.RecordError(contextName, err)
 		return nil
 	}
 
 	// Ensure informers are running (idempotent).
-	s.watchCache.EnsureStarted(contextName, cs.Dynamic, resources)
+	s.watchCache.EnsureStarted(contextName, cs.InformerClient(), resources)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -193,6 +196,12 @@ func (s *Server) buildSearchIndex(contextName string) []searchIndexEntry {
 		// Cold path: fall back to a direct List for this GVR while cache warms.
 		list, listErr := cs.Dynamic.Resource(gvr).List(ctx, metav1.ListOptions{})
 		if listErr != nil {
+			// A context-level failure will fail every remaining list too (and
+			// may re-run a credential plugin); stop and keep the previous index.
+			switch k := s.kubeMgr.RecordError(contextName, listErr); {
+			case k.IsAuth(), k == kube.KindUnreachable, k == kube.KindTLS:
+				return nil
+			}
 			continue
 		}
 		for _, item := range list.Items {

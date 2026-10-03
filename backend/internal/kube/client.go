@@ -2,6 +2,7 @@ package kube
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"sync"
@@ -21,6 +22,17 @@ type ClientSet struct {
 	Dynamic   dynamic.Interface
 	Discovery discovery.DiscoveryInterface
 	Config    *rest.Config
+	// WatchDynamic shares Dynamic's transport but has no client-side request
+	// timeout, so long-lived informer watches are not cut off.
+	WatchDynamic dynamic.Interface
+}
+
+// InformerClient returns the dynamic client informers should use.
+func (cs *ClientSet) InformerClient() dynamic.Interface {
+	if cs.WatchDynamic != nil {
+		return cs.WatchDynamic
+	}
+	return cs.Dynamic
 }
 
 // Manager manages Kubernetes clients per context using the encrypted store.
@@ -29,6 +41,9 @@ type Manager struct {
 	store         *contextstore.Store
 	clients       map[string]*ClientSet
 	activeContext string
+
+	healthOnce sync.Once
+	ht         *healthTracker
 }
 
 const (
@@ -115,6 +130,7 @@ func (m *Manager) SetActiveContext(name string) error {
 // RefreshFromStore refreshes active context and clears cached clients.
 // Call this after profile operations.
 func (m *Manager) RefreshFromStore() {
+	m.resetAllHealth()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.clients = make(map[string]*ClientSet)
@@ -132,7 +148,12 @@ func (m *Manager) RefreshFromStore() {
 }
 
 // GetClientSet returns or creates a ClientSet for the given context name.
+// While the context's auth circuit breaker is open it returns the cached
+// classified error without building a client or invoking a credential plugin.
 func (m *Manager) GetClientSet(contextName string) (*ClientSet, error) {
+	if err := m.breakerError(contextName); err != nil {
+		return nil, err
+	}
 	m.mu.RLock()
 	if cs, ok := m.clients[contextName]; ok {
 		m.mu.RUnlock()
@@ -159,22 +180,41 @@ func (m *Manager) GetClientSet(contextName string) (*ClientSet, error) {
 	}
 	restConfig.QPS = float32(envFloat("KUBED_CLIENT_QPS", defaultClientQPS))
 	restConfig.Burst = envInt("KUBED_CLIENT_BURST", defaultClientBurst)
+	restConfig.Timeout = requestTimeout
 
-	clientset, err := kubernetes.NewForConfig(restConfig)
+	// Build the HTTP client ourselves so the health transport is the outermost
+	// RoundTripper (outside client-go's exec credential wrapper).
+	baseClient, err := rest.HTTPClientFor(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("creating http client for context %q: %w", contextName, err)
+	}
+	transport := &healthTransport{m: m, context: contextName, base: baseClient.Transport}
+	httpClient := &http.Client{Transport: transport, Timeout: restConfig.Timeout, Jar: baseClient.Jar}
+	watchHTTPClient := &http.Client{Transport: transport, Jar: baseClient.Jar}
+
+	clientset, err := kubernetes.NewForConfigAndClient(restConfig, httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("creating clientset for context %q: %w", contextName, err)
 	}
 
-	dynClient, err := dynamic.NewForConfig(restConfig)
+	dynClient, err := dynamic.NewForConfigAndClient(restConfig, httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("creating dynamic client for context %q: %w", contextName, err)
 	}
 
+	watchConfig := rest.CopyConfig(restConfig)
+	watchConfig.Timeout = 0
+	watchDyn, err := dynamic.NewForConfigAndClient(watchConfig, watchHTTPClient)
+	if err != nil {
+		return nil, fmt.Errorf("creating watch client for context %q: %w", contextName, err)
+	}
+
 	cs := &ClientSet{
-		Clientset: clientset,
-		Dynamic:   dynClient,
-		Discovery: clientset.Discovery(),
-		Config:    restConfig,
+		Clientset:    clientset,
+		Dynamic:      dynClient,
+		Discovery:    clientset.Discovery(),
+		Config:       restConfig,
+		WatchDynamic: watchDyn,
 	}
 	m.clients[contextName] = cs
 	return cs, nil
@@ -184,13 +224,15 @@ func (m *Manager) GetClientSet(contextName string) (*ClientSet, error) {
 // Call this after a context's kubeconfig is updated in the store.
 func (m *Manager) InvalidateClient(contextName string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	delete(m.clients, contextName)
+	m.mu.Unlock()
+	m.ResetHealth(contextName)
 }
 
 // ClearAllClients removes all cached clients and resets the active context.
 // Call this after a store reset.
 func (m *Manager) ClearAllClients() {
+	m.resetAllHealth()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.clients = make(map[string]*ClientSet)

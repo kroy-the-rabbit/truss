@@ -268,6 +268,17 @@ func (c *Cache) Discover(contextName string, disc discovery.DiscoveryInterface, 
 	return resources, nil
 }
 
+// Invalidate drops the cached discovery result for a context.
+func (c *Cache) Invalidate(contextName string) {
+	c.mu.Lock()
+	_, ok := c.cache[contextName]
+	delete(c.cache, contextName)
+	c.mu.Unlock()
+	if ok {
+		c.saveToDisk()
+	}
+}
+
 // IsNamespaced returns whether the given resource (by plural name) in the given context
 // is namespace-scoped. Returns true if unknown (safe default for most operations).
 func (c *Cache) IsNamespaced(contextName, group, resource string) bool {
