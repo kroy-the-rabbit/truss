@@ -1,13 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
-  classifyPortForwardStderr,
   decidePortForwardExit,
+  derivePortForwardMessage,
   findPortForwardMatch,
+  normalizePortForwardTargetPort,
   PortForwardLiveness,
 } from '../../src/main/portForwardLogic';
-
-const alive = { exitCode: null, signalCode: null };
-const dead = { exitCode: 1, signalCode: null };
 
 function rec(over: Partial<PortForwardLiveness> = {}): PortForwardLiveness & { id: string } {
   return {
@@ -18,9 +16,9 @@ function rec(over: Partial<PortForwardLiveness> = {}): PortForwardLiveness & { i
     targetName: 'web',
     localPort: 8080,
     targetPort: 80,
+    status: 'running',
     wanted: true,
     restartPending: false,
-    proc: alive,
     ...over,
   };
 }
@@ -34,41 +32,22 @@ const spec = {
   targetPort: 80,
 };
 
-describe('classifyPortForwardStderr', () => {
-  it('treats per-connection forwarding errors as non-fatal', () => {
-    expect(
-      classifyPortForwardStderr(
-        'E0101 12:00:00.000 portforward.go:409] an error occurred forwarding 8080 -> 80: error forwarding port 80 to pod abc: connection refused',
-      ),
-    ).toBe('connection-error');
-    expect(classifyPortForwardStderr('Handling connection for 8080: read: connection reset by peer')).toBe(
-      'connection-error',
-    );
-  });
-
-  it('recognises lost pod connections', () => {
-    expect(classifyPortForwardStderr('error: lost connection to pod')).toBe('lost-connection');
-  });
-
-  it('other output is "other"', () => {
-    expect(classifyPortForwardStderr('Unable to listen on port 8080: address already in use')).toBe('other');
-  });
-});
-
 describe('findPortForwardMatch', () => {
-  it('returns duplicate for a live record with same target, even if its status was error', () => {
+  it('returns duplicate for a live record with the same target', () => {
     const r = rec();
     expect(findPortForwardMatch([r], spec)).toEqual({ kind: 'duplicate', record: r });
+    expect(findPortForwardMatch([rec({ status: 'starting' })], spec)?.kind).toBe('duplicate');
   });
 
   it('treats a record awaiting restart as occupying the port', () => {
-    const r = rec({ proc: undefined, restartPending: true });
+    const r = rec({ status: 'error', restartPending: true });
     expect(findPortForwardMatch([r], spec)?.kind).toBe('duplicate');
   });
 
-  it('ignores dead records', () => {
-    expect(findPortForwardMatch([rec({ proc: dead }), rec({ proc: undefined })], spec)).toBeNull();
-    expect(findPortForwardMatch([rec({ proc: undefined, restartPending: true, wanted: false })], spec)).toBeNull();
+  it('ignores dead or unwanted records', () => {
+    expect(findPortForwardMatch([rec({ status: 'error' }), rec({ status: 'stopped' })], spec)).toBeNull();
+    expect(findPortForwardMatch([rec({ restartPending: true, wanted: false })], spec)).toBeNull();
+    expect(findPortForwardMatch([rec({ wanted: false })], spec)).toBeNull();
   });
 
   it('reports a conflict for a different live target on the same local port', () => {
@@ -92,7 +71,7 @@ describe('decidePortForwardExit', () => {
     expect(decidePortForwardExit({ wanted: false, everRunning: true, restartAttempts: 0 })).toBe('stopped');
   });
 
-  it('errors without retry when the first launch never forwarded', () => {
+  it('errors without retry when the forward never ran', () => {
     expect(decidePortForwardExit({ wanted: true, everRunning: false, restartAttempts: 0 })).toBe('error');
   });
 
@@ -101,5 +80,27 @@ describe('decidePortForwardExit', () => {
       expect(decidePortForwardExit({ wanted: true, everRunning: true, restartAttempts: i })).toBe('restart');
     }
     expect(decidePortForwardExit({ wanted: true, everRunning: true, restartAttempts: 5 })).toBe('error');
+  });
+});
+
+describe('derivePortForwardMessage', () => {
+  it('maps known daemon errors to hints and passes others through', () => {
+    expect(derivePortForwardMessage('error forwarding port 80 to pod p: connect: connection refused')).toMatch(/not listening/);
+    expect(derivePortForwardMessage('unable to listen on 127.0.0.1:8080: bind: address already in use')).toMatch(/already in use/);
+    expect(derivePortForwardMessage('pods "p" is forbidden: User cannot create pods/portforward')).toMatch(/RBAC/);
+    expect(derivePortForwardMessage('lost connection to pod ns/p')).toMatch(/lost/);
+    expect(derivePortForwardMessage('service ns/web has no ready pods')).toBe('service ns/web has no ready pods');
+  });
+});
+
+describe('normalizePortForwardTargetPort', () => {
+  it('accepts numbers and port names, rejects junk', () => {
+    expect(normalizePortForwardTargetPort(80)).toBe(80);
+    expect(normalizePortForwardTargetPort(' 8080 ')).toBe(8080);
+    expect(normalizePortForwardTargetPort('http-alt')).toBe('http-alt');
+    expect(normalizePortForwardTargetPort(0)).toBeUndefined();
+    expect(normalizePortForwardTargetPort(70000)).toBeUndefined();
+    expect(normalizePortForwardTargetPort('Bad_Name')).toBeUndefined();
+    expect(normalizePortForwardTargetPort(null)).toBeUndefined();
   });
 });

@@ -1,29 +1,9 @@
-// Pure port-forward decision logic (no Electron / child_process imports) so it
-// can be unit tested.
+// Pure port-forward decision logic (no Electron / Node imports) so it can be
+// unit tested. Forwards run inside trussd; main only supervises them.
 
 export const PORT_FORWARD_MAX_RESTARTS = 5;
 
-export type PortForwardStderrKind =
-  /** Per-connection failure; kubectl keeps listening. Not fatal. */
-  | 'connection-error'
-  /** The pod stream died; kubectl will exit (or is about to be useless). */
-  | 'lost-connection'
-  | 'other';
-
-export function classifyPortForwardStderr(line: string): PortForwardStderrKind {
-  const lower = line.toLowerCase();
-  if (lower.includes('lost connection to pod')) return 'lost-connection';
-  if (
-    lower.includes('error occurred forwarding') ||
-    lower.includes('an error occurred forwarding') ||
-    lower.includes('error copying from') ||
-    lower.includes('connection reset by peer') ||
-    lower.includes('broken pipe')
-  ) {
-    return 'connection-error';
-  }
-  return 'other';
-}
+export type PortForwardStatus = 'starting' | 'running' | 'stopped' | 'error';
 
 export interface PortForwardSpec {
   context: string;
@@ -35,21 +15,17 @@ export interface PortForwardSpec {
 }
 
 export interface PortForwardLiveness extends PortForwardSpec {
+  status: PortForwardStatus;
   /** User still wants this forward (not stopped by user / lock). */
   wanted: boolean;
-  /** A restart is scheduled (no process right now, but one is coming). */
+  /** A restart is scheduled (nothing running right now, but one is coming). */
   restartPending: boolean;
-  proc?: { exitCode: number | null; signalCode: NodeJS.Signals | string | null } | undefined;
 }
 
-export function hasLiveProcess(rec: Pick<PortForwardLiveness, 'proc'>): boolean {
-  const p = rec.proc;
-  return !!p && p.exitCode === null && p.signalCode === null;
-}
-
-/** A record occupies its local port if kubectl is running or about to be restarted. */
+/** A record occupies its local port while it is (or is about to be) forwarding. */
 export function occupiesLocalPort(rec: PortForwardLiveness): boolean {
-  return hasLiveProcess(rec) || (rec.wanted && rec.restartPending);
+  if (!rec.wanted) return false;
+  return rec.status === 'running' || rec.status === 'starting' || rec.restartPending;
 }
 
 export function sameTarget(a: PortForwardSpec, b: PortForwardSpec): boolean {
@@ -86,12 +62,12 @@ export function findPortForwardMatch<T extends PortForwardLiveness>(
   return conflict ? { kind: 'port-conflict', record: conflict } : null;
 }
 
-export type PortForwardExitDecision = 'stopped' | 'restart' | 'error';
+export type PortForwardFailureDecision = 'stopped' | 'restart' | 'error';
 
 /**
- * What to do when kubectl exits.
+ * What to do when the daemon reports a forward failed.
  * - user/lock stopped it → stopped (never restart)
- * - it never got to "Forwarding from" on the first launch → error (bad target, port in use…)
+ * - it never reached "running" → error (bad target, RBAC…)
  * - otherwise restart until the attempt cap, then error
  */
 export function decidePortForwardExit(opts: {
@@ -99,9 +75,44 @@ export function decidePortForwardExit(opts: {
   everRunning: boolean;
   restartAttempts: number;
   maxRestarts?: number;
-}): PortForwardExitDecision {
+}): PortForwardFailureDecision {
   if (!opts.wanted) return 'stopped';
   if (!opts.everRunning) return 'error';
   const max = opts.maxRestarts ?? PORT_FORWARD_MAX_RESTARTS;
   return opts.restartAttempts < max ? 'restart' : 'error';
+}
+
+/** Turn a daemon error string into a user-facing hint where we know one. */
+export function derivePortForwardMessage(error: string): string {
+  const lower = error.toLowerCase();
+  if (lower.includes('connection refused')) {
+    return 'Target port is not listening in the workload. Verify target port or use the Service target.';
+  }
+  if (lower.includes('address already in use')) {
+    return 'Local port is already in use. Pick a different local port.';
+  }
+  if (lower.includes('forbidden')) {
+    return 'Kubernetes API denied port-forward. Check RBAC permissions.';
+  }
+  if (lower.includes('lost connection to pod')) {
+    return 'Connection to pod was lost. Pod may have restarted or is unreachable.';
+  }
+  return error;
+}
+
+export function normalizePortForwardTargetPort(value: unknown): number | string | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 && value <= 65535 ? value : undefined;
+  }
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (/^\d+$/.test(trimmed)) {
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) && parsed > 0 && parsed <= 65535 ? parsed : undefined;
+  }
+  if (/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(trimmed)) {
+    return trimmed;
+  }
+  return undefined;
 }

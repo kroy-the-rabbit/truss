@@ -29,6 +29,7 @@ import (
 	disc "github.com/kroy/truss/backend/internal/discovery"
 	helmclient "github.com/kroy/truss/backend/internal/helm"
 	"github.com/kroy/truss/backend/internal/kube"
+	"github.com/kroy/truss/backend/internal/portforward"
 	"github.com/kroy/truss/backend/internal/summarizer"
 	"github.com/kroy/truss/backend/internal/watchcache"
 	"golang.org/x/net/http2"
@@ -60,6 +61,7 @@ type Server struct {
 	searchMu       sync.RWMutex
 	searchIndexes  map[string]*searchIndexState
 	watchCache     *watchcache.Manager
+	portForwards   *portforward.Manager
 	// writeEnabled is false (read-only) by default so the zero value fails
 	// closed; see ReadOnly/SetReadOnly in readonly.go.
 	writeEnabled atomic.Bool
@@ -77,6 +79,7 @@ func New(kubeMgr *kube.Manager, store *contextstore.Store, version string) *Serv
 		searchIndexes:  make(map[string]*searchIndexState),
 		watchCache:     newHealthAwareWatchCache(kubeMgr),
 	}
+	s.portForwards = newPortForwardManager(s)
 	// The daemon always starts read-only; the UI must opt in to write mode.
 	s.SetReadOnly(true)
 	return s
@@ -150,6 +153,8 @@ func (s *Server) newMux(token string) *http.ServeMux {
 	mux.HandleFunc("/api/nodes/debug", s.handleNodeDebug)
 	mux.HandleFunc("/api/nodes/debug/delete", s.handleNodeDebugDelete)
 
+	s.registerPortForwardRoutes(mux)
+
 	return mux
 }
 
@@ -215,6 +220,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.listener = nil
 	s.lifecycleMu.Unlock()
 
+	s.stopAllPortForwards()
 	s.watchCache.Close()
 
 	if httpServer == nil {
@@ -2123,6 +2129,7 @@ func (s *Server) handleSetupReset(w http.ResponseWriter, r *http.Request) {
 	// Clear all cached kube clients and watch cache — they are all invalid after a reset.
 	s.kubeMgr.ClearAllClients()
 	s.watchCache.StopAll()
+	s.stopAllPortForwards()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -2177,6 +2184,7 @@ func (s *Server) handleSetupLock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Clear all cached kube clients, watch cache, and search indexes after lock.
+	s.stopAllPortForwards()
 	s.kubeMgr.ClearAllClients()
 	s.watchCache.StopAll()
 	s.searchMu.Lock()
@@ -2450,6 +2458,7 @@ func (s *Server) handleProfilesDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	s.stopAllPortForwards()
 	s.refreshAfterProfileChange()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -2470,6 +2479,7 @@ func (s *Server) handleProfilesSetActive(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	s.stopAllPortForwards()
 	s.refreshAfterProfileChange()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -2682,6 +2692,7 @@ func (s *Server) handleContextsDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.kubeMgr.InvalidateClient(body.Name)
 	s.watchCache.Remove(body.Name)
+	s.stopContextPortForwards(body.Name)
 	if s.kubeMgr.ActiveContext() == body.Name {
 		if next := s.store.LastActiveContext(); next != "" {
 			_ = s.kubeMgr.SetActiveContext(next)
