@@ -327,11 +327,16 @@ export function LogsTab({ name, namespace, context, initialContainer, tabId, onS
           ))}
         </div>
       )}
+      {container && logs.error && (
+        <div className="logs-error-banner" role="alert">
+          Error: {logs.error instanceof Error ? logs.error.message : String(logs.error)}
+          {logs.data ? ' — showing the last logs received' : ''}
+        </div>
+      )}
       <pre className="logs-content" ref={logRef} tabIndex={0} aria-label={`Logs output for pod ${name}${container ? `, container ${container}` : ''}`}>
         {!container && 'Select a container to view logs'}
         {container && logs.isLoading && 'Loading logs...'}
-        {container && logs.error && `Error: ${String(logs.error)}`}
-        {container && !logs.isLoading && !logs.error && filteredLogs}
+        {container && !logs.isLoading && logs.data && filteredLogs}
         {container && logs.data && !logs.data.logs && !logFilter && '(no logs available)'}
         {container && logFilter && filterMatchCount === 0 && logs.data?.logs && '(no lines match filter)'}
       </pre>

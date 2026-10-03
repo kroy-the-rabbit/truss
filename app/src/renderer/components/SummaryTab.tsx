@@ -378,7 +378,7 @@ function ContainerStates({ podName, namespace }: { podName: string; namespace: s
 }
 
 function ContainerActions({ name, state, isInit, podName, namespace }: { name: string; state: string; isInit: boolean; podName: string; namespace: string }) {
-  const { activeContext } = useAppStore();
+  const { activeContext, readOnly } = useAppStore();
   const canExec = state === 'running' && !isInit;
 
   const openSession = (kind: 'logs' | 'exec') => {
@@ -407,7 +407,8 @@ function ContainerActions({ name, state, isInit, podName, namespace }: { name: s
         <button
           className="container-action-btn"
           onClick={(e) => { e.stopPropagation(); openSession('exec'); }}
-          title={`Exec into ${name}`}
+          disabled={readOnly}
+          title={readOnly ? 'Exec is disabled in read-only (RO) mode' : `Exec into ${name}`}
         >
           Exec
         </button>

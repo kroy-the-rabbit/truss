@@ -63,7 +63,7 @@ func ExtractConditions(obj *unstructured.Unstructured) []Condition {
 	}
 	var result []Condition
 	for _, c := range conditions {
-		cm, ok := c.(map[string]interface{})
+		cm, ok := c.(map[string]any)
 		if !ok {
 			continue
 		}
@@ -83,7 +83,7 @@ func summarizePod(obj *unstructured.Unstructured) []SummaryField {
 	var ready, total int
 	containers, _, _ := unstructured.NestedSlice(obj.Object, "status", "containerStatuses")
 	for _, c := range containers {
-		cm, ok := c.(map[string]interface{})
+		cm, ok := c.(map[string]any)
 		if !ok {
 			continue
 		}
@@ -94,7 +94,7 @@ func summarizePod(obj *unstructured.Unstructured) []SummaryField {
 	}
 	var restarts int64
 	for _, c := range containers {
-		cm, ok := c.(map[string]interface{})
+		cm, ok := c.(map[string]any)
 		if !ok {
 			continue
 		}
@@ -135,7 +135,7 @@ func podStartedAt(obj *unstructured.Unstructured) string {
 	collectStatuses := func(path ...string) {
 		statuses, _, _ := unstructured.NestedSlice(obj.Object, path...)
 		for _, s := range statuses {
-			sm, ok := s.(map[string]interface{})
+			sm, ok := s.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -147,11 +147,11 @@ func podStartedAt(obj *unstructured.Unstructured) string {
 			case float64:
 				restarts += int64(v)
 			}
-			running, ok := sm["state"].(map[string]interface{})
+			running, ok := sm["state"].(map[string]any)
 			if !ok {
 				continue
 			}
-			rm, ok := running["running"].(map[string]interface{})
+			rm, ok := running["running"].(map[string]any)
 			if !ok {
 				continue
 			}
@@ -205,28 +205,28 @@ func summarizeIngress(obj *unstructured.Unstructured) []SummaryField {
 	}
 
 	for _, r := range rules {
-		rm, ok := r.(map[string]interface{})
+		rm, ok := r.(map[string]any)
 		if !ok {
 			continue
 		}
 		if host := getString(rm, "host"); host != "" {
 			hosts = append(hosts, host)
 		}
-		httpObj, ok := rm["http"].(map[string]interface{})
+		httpObj, ok := rm["http"].(map[string]any)
 		if !ok {
 			continue
 		}
-		paths, _ := httpObj["paths"].([]interface{})
+		paths, _ := httpObj["paths"].([]any)
 		for _, p := range paths {
-			pm, ok := p.(map[string]interface{})
+			pm, ok := p.(map[string]any)
 			if !ok {
 				continue
 			}
-			backendObj, ok := pm["backend"].(map[string]interface{})
+			backendObj, ok := pm["backend"].(map[string]any)
 			if !ok {
 				continue
 			}
-			svcObj, ok := backendObj["service"].(map[string]interface{})
+			svcObj, ok := backendObj["service"].(map[string]any)
 			if !ok {
 				continue
 			}
@@ -252,20 +252,20 @@ func summarizeIngress(obj *unstructured.Unstructured) []SummaryField {
 	return fields
 }
 
-func ingressBackendRef(backendObj map[string]interface{}) (string, bool) {
-	svcObj, ok := backendObj["service"].(map[string]interface{})
+func ingressBackendRef(backendObj map[string]any) (string, bool) {
+	svcObj, ok := backendObj["service"].(map[string]any)
 	if !ok {
 		return "", false
 	}
 	return ingressServiceBackendRef(svcObj)
 }
 
-func ingressServiceBackendRef(svcObj map[string]interface{}) (string, bool) {
+func ingressServiceBackendRef(svcObj map[string]any) (string, bool) {
 	svcName := getString(svcObj, "name")
 	if svcName == "" {
 		return "", false
 	}
-	portObj, _ := svcObj["port"].(map[string]interface{})
+	portObj, _ := svcObj["port"].(map[string]any)
 	if portObj == nil {
 		return "", false
 	}
@@ -286,7 +286,7 @@ func summarizeService(obj *unstructured.Unstructured) []SummaryField {
 	ports, _, _ := unstructured.NestedSlice(obj.Object, "spec", "ports")
 	var portStrs []string
 	for _, p := range ports {
-		pm, ok := p.(map[string]interface{})
+		pm, ok := p.(map[string]any)
 		if !ok {
 			continue
 		}
@@ -424,7 +424,7 @@ func getNestedInt(obj *unstructured.Unstructured, fields ...string) int64 {
 	return val
 }
 
-func getString(m map[string]interface{}, key string) string {
+func getString(m map[string]any, key string) string {
 	val, ok := m[key]
 	if !ok {
 		return ""

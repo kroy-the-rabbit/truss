@@ -30,11 +30,11 @@ func TestSanitizeProfileColor(t *testing.T) {
 		{"", "", false},
 		{"   ", "", false},
 		{"#aabbcc", "#aabbcc", false},
-		{"#AABBCC", "#aabbcc", false},  // normalised to lowercase
-		{"#ABC", "", true},              // too short
-		{"#AABBCCD", "", true},          // too long
-		{"aabbcc", "", true},            // missing #
-		{"#zzzzzz", "", true},           // non-hex chars
+		{"#AABBCC", "#aabbcc", false}, // normalised to lowercase
+		{"#ABC", "", true},            // too short
+		{"#AABBCCD", "", true},        // too long
+		{"aabbcc", "", true},          // missing #
+		{"#zzzzzz", "", true},         // non-hex chars
 	}
 	for _, tt := range tests {
 		got, err := sanitizeProfileColor(tt.input)

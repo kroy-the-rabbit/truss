@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { useAppStore } from '../state/store';
-import { useContexts, useSetActiveContext, useNamespaces, usePing, useProfiles, useSetActiveProfile, useContextPreflight } from '../state/queries';
+import { useContexts, useSetActiveContext, useNamespaces, usePing, useProfiles, useSetActiveProfile, useContextPreflight, isContextTimeoutError } from '../state/queries';
+import { useContextHealth, healthKindLabel } from '../state/contextHealth';
+import { deriveDaemonIndicator, useConnectionStore } from '../state/connectionStore';
 import { ContextManager } from './ContextManager';
 import { PluginManager } from '../plugins/PluginManager';
 
@@ -28,15 +30,38 @@ export function TopBar() {
   const setProfileMutation = useSetActiveProfile();
   const namespaces = useNamespaces(activeContext);
   const preflight = useContextPreflight(activeContext);
-  const daemonConnected = ping.isSuccess;
-  const contextUnreachable = !!activeContext && daemonConnected && namespaces.isError;
+  const daemonSupported = useConnectionStore((s) => s.supported);
+  const daemonState = useConnectionStore((s) => s.daemon);
+  const daemonIndicator = deriveDaemonIndicator({
+    supported: daemonSupported,
+    daemon: daemonState,
+    pingSuccess: ping.isSuccess,
+    pingError: ping.isError,
+    pingErrorMessage: ping.error instanceof Error ? ping.error.message : undefined,
+  });
+  const daemonConnected = daemonIndicator.level === 'ok';
+  const health = useContextHealth(activeContext);
+  const healthError = health?.state === 'error' ? health : null;
+  const contextUnreachable = !!activeContext && daemonConnected && (namespaces.isError || !!healthError);
   const contextChecking = !!activeContext && daemonConnected && namespaces.isFetching && !namespaces.isError;
   const contextSlow = contextChecking && contextCheckDelayed;
   const missingExecHelper = !!activeContext && daemonConnected && preflight.data?.missing_exec_helper;
   const missingExecCommand = preflight.data?.exec_command || '';
   const contextErrorDetail =
-    namespaces.error instanceof Error ? namespaces.error.message : 'Failed to reach the selected context';
-  const statusClass = !daemonConnected ? 'disconnected' : contextUnreachable || contextSlow || missingExecHelper ? 'warning' : 'connected';
+    healthError?.message ||
+    (namespaces.error instanceof Error ? namespaces.error.message : 'Failed to reach the selected context');
+  const waitingForExecPlugin =
+    !healthError && namespaces.isError && isContextTimeoutError(namespaces.error) && !!preflight.data?.has_exec_auth;
+  const contextAlertText = healthError
+    ? healthKindLabel(healthError.kind)
+    : waitingForExecPlugin
+      ? 'Waiting for auth plugin (browser login?)'
+      : 'Context unreachable';
+  const statusClass = daemonIndicator.level === 'down'
+    ? 'disconnected'
+    : daemonIndicator.level === 'reconnecting'
+      ? 'warning'
+      : contextUnreachable || contextSlow || missingExecHelper ? 'warning' : 'connected';
   const activeProfileColor =
     profiles.data?.profiles.find((p) => p.name === activeProfile)?.color ||
     profiles.data?.active_profile_color ||
@@ -44,8 +69,8 @@ export function TopBar() {
   const appIconSrc = React.useMemo(() => new URL('icon.png', window.location.href).toString(), []);
 
   React.useEffect(() => {
-    setConnected(ping.isSuccess);
-  }, [ping.isSuccess, setConnected]);
+    setConnected(daemonConnected);
+  }, [daemonConnected, setConnected]);
 
   // Global keyboard shortcut: Cmd+, (all platforms) → open Preferences.
   React.useEffect(() => {
@@ -136,8 +161,24 @@ export function TopBar() {
     <div className={`top-bar ${!readOnly ? 'write-mode' : ''}`}>
       <div className="top-bar-left">
         <img className="app-icon" src={appIconSrc} alt="" aria-hidden="true" />
-        <span className={`status-dot ${statusClass}`} />
+        <span
+          className={`status-dot ${statusClass}`}
+          data-testid="daemon-status-dot"
+          title={daemonIndicator.title}
+          aria-label={daemonIndicator.title}
+          role="img"
+        />
         <span className="app-title">Truss</span>
+        {daemonIndicator.level !== 'ok' && (
+          <span
+            className={`topbar-daemon-status ${daemonIndicator.level}`}
+            role="status"
+            aria-live="polite"
+            title={daemonIndicator.title}
+          >
+            {daemonIndicator.label}
+          </span>
+        )}
         <select
           className="topbar-profile-select"
           title="Active profile"
@@ -167,7 +208,7 @@ export function TopBar() {
           >
             <span className="topbar-network-alert-icon">{contextUnreachable ? '!' : '\u2026'}</span>
             <span className="topbar-network-alert-text">
-              {contextUnreachable ? 'Context unreachable' : 'Checking context connectivity'}
+              {contextUnreachable ? contextAlertText : 'Checking context connectivity'}
             </span>
             <span className="topbar-network-alert-action">Retry</span>
           </button>

@@ -4,7 +4,7 @@ import { useResources, useHelmReleases, useDeleteResource, useUninstallRelease, 
 import { ContextMenu, ContextMenuItem } from './ContextMenu';
 import { useClassifyHealth, toPluginResource } from '../plugins';
 import { pluginRegistry } from '../plugins/registry';
-import { createPluginAPI } from '../plugins/api';
+import { describeQueryError, isRbacDeniedError } from '../lib/connectErrors';
 
 type SortField = 'name' | 'namespace' | 'status' | 'age';
 type SortDir = 'asc' | 'desc';
@@ -142,12 +142,6 @@ function helmStatusClass(status: string): string {
 }
 
 interface MenuState { x: number; y: number; items: ContextMenuItem[] }
-
-function isRbacDeniedError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err ?? '');
-  const lower = msg.toLowerCase();
-  return lower.includes('forbidden') || lower.includes('permission denied') || lower.includes('rbac');
-}
 
 function NamespaceHeader({ nsFilter, setNsFilter }: { nsFilter: Set<string>; setNsFilter: (f: Set<string>) => void }) {
   const { activeContext, activeNamespace, setActiveNamespace } = useAppStore();
@@ -353,7 +347,7 @@ function HelmReleaseList() {
         {helmReleases.isError ? (
           <div className="resource-list-error">
             <div className="error-message">
-              Failed to load Helm releases: {helmReleases.error instanceof Error ? helmReleases.error.message : 'Unknown error'}
+              Failed to load Helm releases: {describeQueryError(helmReleases.error)}
             </div>
             <button className="retry-btn" onClick={() => helmReleases.refetch()}>Retry</button>
           </div>
@@ -478,7 +472,6 @@ export function ResourceList() {
   }, []);
   const classifyHealth = useClassifyHealth();
   const tableBodyRef = useRef<HTMLDivElement>(null);
-  const pluginApi = useMemo(() => createPluginAPI('@truss/builtin'), []);
 
   const toggleSort = useCallback((field: SortField) => {
     if (sortField === field) {
@@ -681,7 +674,7 @@ export function ResourceList() {
         {resources.isError ? (
           <div className="resource-list-error">
             <div className="error-message">
-              Failed to load resources: {resources.error instanceof Error ? resources.error.message : 'Unknown error'}
+              Failed to load resources: {describeQueryError(resources.error)}
             </div>
             {isRbacDeniedError(resources.error) && (
               <div className="error-message" style={{ marginTop: 8, opacity: 0.85 }}>
@@ -783,7 +776,7 @@ export function ResourceList() {
                           items.push({
                             label: pluginItem.label,
                             danger: pluginItem.isDanger,
-                            onClick: () => pluginItem.onClick(pluginRes, pluginApi),
+                            onClick: () => pluginItem.onClick(pluginRes, pluginRegistry.apiFor(pluginItem._pluginId)),
                           });
                         }
                       }

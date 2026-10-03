@@ -120,7 +120,7 @@ type fileEntry struct {
 
 func parseLsOutput(output string) []fileEntry {
 	var entries []fileEntry
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if line == "" || strings.HasPrefix(line, "total ") {
 			continue
@@ -273,6 +273,9 @@ func (s *Server) handleFileUpload() http.HandlerFunc {
 			http.Error(w, "POST required", http.StatusMethodNotAllowed)
 			return
 		}
+		if s.rejectIfReadOnly(w) {
+			return
+		}
 		q := r.URL.Query()
 		ctxName := q.Get("context")
 		if ctxName == "" {
@@ -312,6 +315,9 @@ func (s *Server) handleFileUpload() http.HandlerFunc {
 // POST /api/file/mkdir?context=&namespace=&pod=&container=&path=
 func (s *Server) handleFileMkdir() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.rejectIfReadOnly(w) {
+			return
+		}
 		q := r.URL.Query()
 		ctxName := q.Get("context")
 		if ctxName == "" {
@@ -342,4 +348,3 @@ func (s *Server) handleFileMkdir() http.HandlerFunc {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }
-

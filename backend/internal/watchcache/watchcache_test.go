@@ -93,7 +93,6 @@ func injectContext(m *Manager, name string) *contextCache {
 	cc := &contextCache{
 		stopCh: make(chan struct{}),
 		gvrs:   make(map[schema.GroupVersionResource]*gvrEntry),
-		subs:   make(map[int]chan ResourceEvent),
 	}
 	m.mu.Lock()
 	m.contexts[name] = cc
@@ -143,8 +142,8 @@ func TestHasGVRReturnsTrueWhenRegistered(t *testing.T) {
 
 func TestSubscribeReturnsFalseForUnknownContext(t *testing.T) {
 	m := New()
-	ch, cancel, ok := m.Subscribe("no-such-ctx")
-	if ok || ch != nil || cancel != nil {
+	sub, ok := m.Subscribe("no-such-ctx")
+	if ok || sub != nil {
 		t.Error("Subscribe should return ok=false for unknown context")
 	}
 }
@@ -153,40 +152,43 @@ func TestSubscribeAndCancel(t *testing.T) {
 	m := New()
 	injectContext(m, "ctx")
 
-	ch, cancel, ok := m.Subscribe("ctx")
-	if !ok || ch == nil || cancel == nil {
+	sub, ok := m.Subscribe("ctx")
+	if !ok || sub == nil {
 		t.Fatal("Subscribe should succeed for known context")
 	}
+	ch := sub.Events()
 
-	// Channel should be readable (buffered).
 	select {
 	case <-ch:
 		t.Error("channel should be empty initially")
 	default:
-		// expected
+	}
+	if got := m.SubscriberCount("ctx"); got != 1 {
+		t.Fatalf("SubscriberCount = %d, want 1", got)
 	}
 
-	// Cancel should close the channel without panic.
-	cancel()
-	_, open := <-ch
-	if open {
-		t.Error("channel should be closed after cancel()")
+	sub.Cancel()
+	if _, open := <-ch; open {
+		t.Error("channel should be closed after Cancel()")
+	}
+	if got := m.SubscriberCount("ctx"); got != 0 {
+		t.Fatalf("SubscriberCount after cancel = %d, want 0", got)
 	}
 
 	// Double-cancel should not panic.
-	cancel()
+	sub.Cancel()
 }
 
 func TestSubscribeMultipleSubscribers(t *testing.T) {
 	m := New()
 	injectContext(m, "ctx")
 
-	ch1, cancel1, _ := m.Subscribe("ctx")
-	ch2, cancel2, _ := m.Subscribe("ctx")
-	defer cancel1()
-	defer cancel2()
+	s1, _ := m.Subscribe("ctx")
+	s2, _ := m.Subscribe("ctx")
+	defer s1.Cancel()
+	defer s2.Cancel()
 
-	if ch1 == ch2 {
+	if s1.Events() == s2.Events() {
 		t.Error("each subscriber should get a distinct channel")
 	}
 }
@@ -211,26 +213,50 @@ func TestInvalidateRemovesContext(t *testing.T) {
 	}
 }
 
-func TestInvalidateClosesSubscriberChannels(t *testing.T) {
+func TestInvalidateKeepsSubscribers(t *testing.T) {
 	m := New()
 	injectContext(m, "ctx")
-	ch, _, ok := m.Subscribe("ctx")
+	sub, ok := m.Subscribe("ctx")
+	if !ok {
+		t.Fatal("Subscribe failed")
+	}
+	defer sub.Cancel()
+
+	m.Invalidate("ctx")
+
+	select {
+	case _, open := <-sub.Events():
+		if !open {
+			t.Fatal("Invalidate must not close subscriber channels")
+		}
+	default:
+	}
+	if got := m.SubscriberCount("ctx"); got != 1 {
+		t.Fatalf("SubscriberCount = %d, want 1", got)
+	}
+}
+
+func TestRemoveClosesSubscriberChannels(t *testing.T) {
+	m := New()
+	injectContext(m, "ctx")
+	sub, ok := m.Subscribe("ctx")
 	if !ok {
 		t.Fatal("Subscribe failed")
 	}
 
-	m.Invalidate("ctx")
+	m.Remove("ctx")
 
-	_, open := <-ch
-	if open {
-		t.Error("subscriber channels should be closed on Invalidate")
+	if _, open := <-sub.Events(); open {
+		t.Error("subscriber channels should be closed on Remove")
 	}
+	sub.Cancel() // must not panic after Remove
 }
 
 func TestInvalidateNonexistentContextNoOp(t *testing.T) {
 	m := New()
 	// Must not panic.
 	m.Invalidate("never-existed")
+	m.Remove("never-existed")
 }
 
 func TestStopAllRemovesAllContexts(t *testing.T) {
@@ -239,8 +265,8 @@ func TestStopAllRemovesAllContexts(t *testing.T) {
 	injectContext(m, "ctx2")
 	injectContext(m, "ctx3")
 
-	ch1, _, _ := m.Subscribe("ctx1")
-	ch2, _, _ := m.Subscribe("ctx2")
+	s1, _ := m.Subscribe("ctx1")
+	s2, _ := m.Subscribe("ctx2")
 
 	m.StopAll()
 
@@ -253,10 +279,10 @@ func TestStopAllRemovesAllContexts(t *testing.T) {
 	}
 
 	// Subscriber channels must be closed.
-	if _, open := <-ch1; open {
+	if _, open := <-s1.Events(); open {
 		t.Error("ctx1 subscriber channel should be closed after StopAll")
 	}
-	if _, open := <-ch2; open {
+	if _, open := <-s2.Events(); open {
 		t.Error("ctx2 subscriber channel should be closed after StopAll")
 	}
 }

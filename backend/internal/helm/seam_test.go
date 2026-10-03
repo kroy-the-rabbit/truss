@@ -13,9 +13,9 @@ import (
 	kubefake "helm.sh/helm/v3/pkg/kube/fake"
 	"helm.sh/helm/v3/pkg/registry"
 	"helm.sh/helm/v3/pkg/release"
-	helmtime "helm.sh/helm/v3/pkg/time"
 	"helm.sh/helm/v3/pkg/storage"
 	"helm.sh/helm/v3/pkg/storage/driver"
+	helmtime "helm.sh/helm/v3/pkg/time"
 	"k8s.io/client-go/rest"
 )
 
@@ -32,7 +32,7 @@ func testActionConfig(t *testing.T) *action.Configuration {
 		KubeClient:     &kubefake.FailingKubeClient{PrintingKubeClient: kubefake.PrintingKubeClient{Out: io.Discard}},
 		Capabilities:   chartutil.DefaultCapabilities,
 		RegistryClient: reg,
-		Log:            func(format string, v ...interface{}) {},
+		Log:            func(format string, v ...any) {},
 	}
 }
 
@@ -206,7 +206,7 @@ func TestGetValuesWithConfig(t *testing.T) {
 	ac := testActionConfig(t)
 	deployed := time.Now()
 	rel := testReleaseStub("with-vals", "default", 1, release.StatusDeployed, "chart", "1.0.0", deployed)
-	rel.Config = map[string]interface{}{"replicaCount": 3, "image": map[string]interface{}{"tag": "v2"}}
+	rel.Config = map[string]any{"replicaCount": 3, "image": map[string]any{"tag": "v2"}}
 	if err := ac.Releases.Create(rel); err != nil {
 		t.Fatalf("Create: %v", err)
 	}

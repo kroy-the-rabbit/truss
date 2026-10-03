@@ -79,6 +79,9 @@ export async function installElectronApiMock(page: Page) {
 
     (window as any).electronAPI = {
       getDaemonConfig: async () => ({ port: daemonPort, token: 'test-token' }),
+      getDaemonState: async () => ({ status: 'ready', epoch: 1 }),
+      onDaemonState: () => noopUnsub,
+      onSystemResume: () => noopUnsub,
       getPreferences: async () => prefs,
       onThemeUpdated: () => noopUnsub,
       getAppInfo: async () => ({ name: 'Truss', version: 'test' }),
@@ -94,12 +97,12 @@ export async function installElectronApiMock(page: Page) {
       onSessionEvent: () => noopUnsub,
       setThemeMode: async () => undefined,
       setExecPathHints: async () => undefined,
-      openExternalTerminal: async () => ({ ok: true }),
       localFsList: async () => [],
       localFsHome: async () => '/tmp',
       localFsSave: async () => undefined,
       localFsRead: async () => '',
       localFsMkdir: async () => undefined,
+      localFsBeginDownload: async () => undefined,
       openFileTransferWindow: async () => ({ ok: true }),
       sessionLogAppend: async () => undefined,
       sessionLogPath: async () => '',
@@ -113,11 +116,12 @@ export async function installElectronApiMock(page: Page) {
       getYamlDiffPayload: async () => null,
       submitYamlDiffDecision: async () => undefined,
       pluginList: async () => [],
-      pluginReadFile: async () => '',
+      pluginLoad: async () => [],
       pluginStorageGet: async () => null,
       pluginStorageSet: async () => undefined,
       pluginStorageDelete: async () => undefined,
-      pluginSetEnabled: async () => undefined,
+      pluginSecureStorage: async () => null,
+      pluginSetApproval: async () => ({ approved: false }),
       openPluginDirectory: async () => undefined,
     };
   }, { daemonPort: DAEMON_PORT });

@@ -1,13 +1,37 @@
-import { app, BrowserWindow, crashReporter, dialog, ipcMain, Menu, nativeTheme, session, shell, clipboard } from 'electron';
-import { ChildProcess, spawn, spawnSync } from 'child_process';
+import { app, BrowserWindow, crashReporter, dialog, ipcMain, Menu, nativeTheme, powerMonitor, session, shell, clipboard } from 'electron';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { startDaemon, stopDaemon, DaemonConfig, enrichPath } from './daemon';
-import { readPluginFileUtf8 } from './pluginFs';
+import {
+  checkDaemonNow,
+  getDaemonConfig,
+  getDaemonMainAccess,
+  getDaemonState,
+  startDaemonSupervisor,
+  stopDaemon,
+} from './daemon';
+import {
+  APPROVALS_FILE,
+  ApprovalMap,
+  buildPluginRecords,
+  DiscoveredPlugin,
+  discoverPluginsOnDisk,
+  evaluateConsent,
+  migrateLegacyEnabledMap,
+  PluginCapabilityRegistry,
+  readApprovals,
+  readPluginFromDisk,
+  recordDecision,
+  writeApprovals,
+} from './pluginConsent';
+import { pluginSecureStorageRequest } from './pluginSecureStorage';
+import { normalizePortForwardTargetPort } from './portForwardLogic';
+import { PortForwardSupervisor } from './portForwardSupervisor';
+import { createDaemonPortForwardApi } from './portForwardApi';
+import { ApprovedRoots, assertInsideApprovedRoot } from './pathSafety';
+import { assertTrustedSender, installSecurityGuards } from './security';
 
 let mainWindow: BrowserWindow | null = null;
-let daemonConfig: DaemonConfig | null = null;
 let logsWindow: BrowserWindow | null = null;
 // Each exec session gets its own window, keyed by "context:namespace:pod:container".
 const execWindows = new Map<string, BrowserWindow>();
@@ -39,25 +63,15 @@ if (!singleInstanceLock) {
   });
 }
 
-interface PortForwardRecord {
-  id: string;
-  context: string;
-  namespace: string;
-  targetType: 'pod' | 'service';
-  targetName: string;
-  localPort: number;
-  targetPort: number | string;
-  status: 'starting' | 'running' | 'stopped' | 'error';
-  startedAt: string;
-  stoppedAt?: string;
-  pid?: number;
-  message?: string;
-  output: string;
-  proc?: ChildProcess;
-}
-
-const portForwards = new Map<string, PortForwardRecord>();
+// Port-forwards run inside trussd with the vault's credentials; main only
+// supervises them (restart policy, daemon restarts, lock).
+const portForwardApi = createDaemonPortForwardApi(getDaemonConfig);
+const portForwards = new PortForwardSupervisor({
+  api: portForwardApi,
+  getEpoch: () => getDaemonState().epoch,
+});
 let sessionLocked = false;
+
 
 // Minimize persistent Chromium artifacts on disk.
 app.commandLine.appendSwitch('disable-http-cache');
@@ -507,17 +521,10 @@ function broadcastSessionEvent(type: string) {
 ipcMain.handle('session-broadcast', (_event, type: string) => {
   if (type === 'locked') {
     sessionLocked = true;
-    for (const pf of portForwards.values()) {
-      if (pf.status === 'running' || pf.status === 'starting') {
-        stopPortForwardSession(pf);
-        pf.status = 'stopped';
-        pf.stoppedAt = new Date().toISOString();
-        pf.message = 'Stopped: store locked';
-        pf.proc = undefined;
-      }
-    }
+    portForwards.lock();
   } else if (type === 'unlocked') {
     sessionLocked = false;
+    portForwards.unlock();
   }
   broadcastSessionEvent(type);
 });
@@ -792,8 +799,15 @@ ipcMain.handle('open-portforward-window', async (_event, opts: Record<string, un
       : 0,
   };
 
-  if (!targetPortProvided && prefill.targetName) {
-    const detected = detectDefaultTargetPort(prefill.context, prefill.namespace, prefill.targetType, prefill.targetName);
+  if (!targetPortProvided && prefill.targetName && prefill.namespace) {
+    const detected = await portForwardApi
+      .suggestPort({
+        context: prefill.context,
+        namespace: prefill.namespace,
+        kind: prefill.targetType,
+        name: prefill.targetName,
+      })
+      .catch(() => 0);
     if (detected) {
       prefill.targetPort = detected;
       if (!localPortProvided || prefill.localPort <= 0) {
@@ -840,10 +854,10 @@ ipcMain.handle('open-portforward-window', async (_event, opts: Record<string, un
 });
 
 ipcMain.handle('port-forward-list', () => {
-  return Array.from(portForwards.values()).map(sanitizePortForward);
+  return portForwards.list();
 });
 
-ipcMain.handle('port-forward-start', (_event, opts: Record<string, unknown>) => {
+ipcMain.handle('port-forward-start', async (_event, opts: Record<string, unknown>) => {
   if (sessionLocked) {
     throw new Error('Store is locked; unlock before starting a port-forward');
   }
@@ -854,110 +868,18 @@ ipcMain.handle('port-forward-start', (_event, opts: Record<string, unknown>) => 
   const localPort = Number(opts.localPort);
   const targetPort = normalizePortForwardTargetPort(opts.targetPort);
 
-  if (!namespace || !targetName || !Number.isFinite(localPort) || localPort <= 0 || targetPort === undefined) {
+  if (
+    !namespace || !targetName || !Number.isInteger(localPort) || localPort <= 0 || localPort > 65535 ||
+    targetPort === undefined
+  ) {
     throw new Error('Invalid port forward parameters');
   }
 
-  const existing = Array.from(portForwards.values()).find(
-    (p) =>
-      p.context === context &&
-      p.namespace === namespace &&
-      p.targetType === targetType &&
-      p.targetName === targetName &&
-      p.localPort === localPort &&
-      p.targetPort === targetPort &&
-      (p.status === 'starting' || p.status === 'running'),
-  );
-  if (existing) {
-    return sanitizePortForward(existing);
-  }
-
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  const targetRef = `${targetType === 'service' ? 'svc' : 'pod'}/${targetName}`;
-  const args = ['port-forward', '-n', namespace, targetRef, `${localPort}:${targetPort}`];
-  if (context) args.push('--context', context);
-
-  const proc = spawn('kubectl', args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      PATH: enrichPath(preferences.execPathHints),
-    },
-  });
-
-  const rec: PortForwardRecord = {
-    id,
-    context,
-    namespace,
-    targetType,
-    targetName,
-    localPort,
-    targetPort,
-    status: 'starting',
-    startedAt: new Date().toISOString(),
-    pid: proc.pid,
-    output: '',
-    proc,
-  };
-  portForwards.set(id, rec);
-
-  proc.stdout.on('data', (buf) => {
-    const line = String(buf);
-    rec.output = trimPortForwardOutput(rec.output + line);
-    if (rec.status === 'starting' && line.toLowerCase().includes('forwarding from')) {
-      rec.status = 'running';
-      rec.message = 'Forwarding';
-    }
-  });
-
-  proc.stderr.on('data', (buf) => {
-    const line = String(buf);
-    rec.output = trimPortForwardOutput(rec.output + line);
-    const msg = line.trim();
-    if (msg) {
-      rec.message = msg;
-    }
-    if (rec.status === 'starting') {
-      rec.status = 'error';
-      rec.message = derivePortForwardMessage(rec.output, msg || 'Port-forward failed');
-    } else if (
-      line.toLowerCase().includes('error occurred forwarding') ||
-      line.toLowerCase().includes('lost connection to pod')
-    ) {
-      rec.status = 'error';
-      rec.message = derivePortForwardMessage(rec.output, msg || 'Port-forward failed');
-    }
-  });
-
-  proc.on('error', (err) => {
-    rec.status = 'error';
-    rec.message = String(err.message || err);
-    rec.stoppedAt = new Date().toISOString();
-    rec.proc = undefined;
-  });
-
-  proc.on('close', (code) => {
-    if (rec.status !== 'error') {
-      rec.status = code === 0 ? 'stopped' : 'error';
-      const fallback = code === 0 ? 'Stopped' : `Exited with code ${String(code)}`;
-      rec.message = derivePortForwardMessage(rec.output, fallback);
-    }
-    rec.stoppedAt = new Date().toISOString();
-    rec.proc = undefined;
-  });
-
-  return sanitizePortForward(rec);
+  return portForwards.start({ context, namespace, targetType, targetName, localPort, targetPort });
 });
 
-ipcMain.handle('port-forward-stop', (_event, id: string) => {
-  const rec = portForwards.get(String(id));
-  if (!rec) return { ok: false };
-  stopPortForwardSession(rec);
-  rec.status = 'stopped';
-  rec.stoppedAt = new Date().toISOString();
-  rec.message = 'Stopped';
-  rec.proc = undefined;
-  return { ok: true };
+ipcMain.handle('port-forward-stop', async (_event, id: string) => {
+  return { ok: await portForwards.stop(String(id)) };
 });
 
 ipcMain.handle('port-forward-open-url', (_event, id: string) => {
@@ -970,9 +892,30 @@ ipcMain.handle('port-forward-open-url', (_event, id: string) => {
 });
 
 // Handle daemon config requests from renderer.
-ipcMain.handle('get-daemon-config', () => {
-  return daemonConfig;
+ipcMain.handle('get-daemon-config', (event) => {
+  assertTrustedSender(event);
+  return getDaemonConfig();
 });
+
+ipcMain.handle('get-daemon-state', (event) => {
+  assertTrustedSender(event);
+  return getDaemonState();
+});
+
+/** Send an IPC event to every open window (main, logs, exec, file transfer, port-forward, popouts). */
+function broadcastToAllWindows(channel: string, ...args: unknown[]) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) continue;
+    win.webContents.send(channel, ...args);
+  }
+}
+
+function handleSystemResume(reason: string) {
+  console.log(`System ${reason}: re-checking daemon and port-forwards`);
+  checkDaemonNow();
+  portForwards.resume();
+  broadcastToAllWindows('system-resume');
+}
 
 ipcMain.handle('get-preferences', () => ({
   themeMode: preferences.themeMode,
@@ -995,9 +938,21 @@ ipcMain.handle('set-event-suppression-rules', (_event, rules: unknown) => {
   return { eventSuppressionRules: preferences.eventSuppressionRules };
 });
 
+// Release builds record the full version (e.g. 0.97.53d0115) as trussVersion,
+// because package.json's version must be semver (0.97.0).
+function displayVersion(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8')) as { trussVersion?: unknown };
+    if (typeof pkg.trussVersion === 'string' && pkg.trussVersion) return pkg.trussVersion;
+  } catch {
+    // fall back to the semver version
+  }
+  return app.getVersion();
+}
+
 ipcMain.handle('get-app-info', () => ({
   name: app.getName(),
-  version: app.getVersion(),
+  version: displayVersion(),
 }));
 
 ipcMain.handle('set-theme-mode', (_event, mode: unknown, tone?: unknown) => {
@@ -1012,182 +967,6 @@ ipcMain.handle('set-theme-mode', (_event, mode: unknown, tone?: unknown) => {
     userCssPath: getUserCssPath(),
   };
 });
-
-// Handle "open in system terminal" requests.
-function shellEscapePosix(arg: string): string {
-  return `'${arg.replace(/'/g, `'\\''`)}'`;
-}
-
-function shellEscapeCmd(arg: string): string {
-  // Keep cmd.exe metacharacters inert while preserving argument boundaries.
-  return `"${arg.replace(/[%^&|<>()!"]/g, '^$&')}"`;
-}
-
-ipcMain.handle('open-external-terminal', (_event, opts: Record<string, unknown>) => {
-  const { type, context, namespace, pod, container, tailLines, timestamps } = opts as {
-    type: string;
-    context: string;
-    namespace: string;
-    pod: string;
-    container: string;
-    tailLines?: number;
-    timestamps?: boolean;
-  };
-
-  let cmd: string;
-  let args: string[];
-
-  if (type === 'exec') {
-    cmd = 'kubectl';
-    args = ['exec', '-it', '-n', namespace, pod, '-c', container];
-    if (context) args.push('--context', context);
-    args.push('--', '/bin/bash', '-c', 'exec bash 2>/dev/null || exec sh');
-  } else {
-    // logs
-    cmd = 'kubectl';
-    args = ['logs', '-f', '-n', namespace, pod, '-c', container];
-    if (context) args.push('--context', context);
-    if (tailLines && tailLines > 0) args.push('--tail', String(tailLines));
-    if (timestamps) args.push('--timestamps');
-  }
-
-  const fullCmdPosix = [cmd, ...args].map(shellEscapePosix).join(' ');
-  const fullCmdCmdExe = [cmd, ...args].map(shellEscapeCmd).join(' ');
-
-  const platform = process.platform;
-  if (platform === 'linux') {
-    const holdOpenCmd = `${fullCmdPosix}; exec bash`;
-    const terminals = [
-      { cmd: 'gnome-terminal', args: ['--', 'bash', '-lc', holdOpenCmd] },
-      { cmd: 'konsole', args: ['-e', 'bash', '-lc', holdOpenCmd] },
-      { cmd: 'xterm', args: ['-e', 'bash', '-lc', holdOpenCmd] },
-    ];
-    trySpawnTerminal(terminals);
-  } else if (platform === 'darwin') {
-    const escaped = `${fullCmdPosix}; exec bash`
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"');
-    spawn('osascript', ['-e', `tell application "Terminal" to do script "${escaped}"`], { detached: true, stdio: 'ignore' });
-  } else if (platform === 'win32') {
-    spawn('cmd.exe', ['/c', 'start', 'cmd', '/k', fullCmdCmdExe], { detached: true, stdio: 'ignore' });
-  }
-
-  return { ok: true };
-});
-
-function trySpawnTerminal(terminals: Array<{ cmd: string; args: string[] }>) {
-  if (terminals.length === 0) return;
-  const [first, ...rest] = terminals;
-  const proc = spawn(first.cmd, first.args, { detached: true, stdio: 'ignore' });
-  proc.on('error', () => {
-    trySpawnTerminal(rest);
-  });
-  proc.unref();
-}
-
-function trimPortForwardOutput(out: string): string {
-  if (out.length <= 64_000) return out;
-  return out.slice(out.length - 64_000);
-}
-
-function normalizePortForwardTargetPort(value: unknown): number | string | undefined {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) && value > 0 ? value : undefined;
-  }
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  if (/^\d+$/.test(trimmed)) {
-    const parsed = Number(trimmed);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-  }
-  if (/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(trimmed)) {
-    return trimmed;
-  }
-  return undefined;
-}
-
-function derivePortForwardMessage(output: string, fallback: string): string {
-  const lower = output.toLowerCase();
-  if (lower.includes('connect: connection refused') || lower.includes('failed to connect to localhost')) {
-    return 'Target port is not listening in the workload. Verify target port or use the Service target.';
-  }
-  if (lower.includes('address already in use')) {
-    return 'Local port is already in use. Pick a different local port.';
-  }
-  if (lower.includes('forbidden')) {
-    return 'Kubernetes API denied port-forward. Check RBAC permissions.';
-  }
-  if (lower.includes('lost connection to pod')) {
-    return 'Connection to pod was lost. Pod may have restarted or is unreachable.';
-  }
-  return fallback;
-}
-
-function detectDefaultTargetPort(
-  context: string,
-  namespace: string,
-  targetType: 'pod' | 'service',
-  targetName: string,
-): number | undefined {
-  if (!namespace || !targetName) return undefined;
-  const resource = targetType === 'service' ? 'service' : 'pod';
-  const jsonPath = targetType === 'service'
-    ? `{.spec.ports[*].port}`
-    : `{.spec.containers[*].ports[*].containerPort}`;
-  const args = ['get', resource, targetName, '-n', namespace, '-o', `jsonpath=${jsonPath}`];
-  if (context) args.push('--context', context);
-  const res = spawnSync('kubectl', args, {
-    encoding: 'utf8',
-    timeout: 6000,
-    env: {
-      ...process.env,
-      PATH: enrichPath(preferences.execPathHints),
-    },
-  });
-  if (res.status !== 0) return undefined;
-  const text = String(res.stdout || '');
-  const match = text.match(/\b(\d{2,5})\b/);
-  if (!match) return undefined;
-  const p = Number(match[1]);
-  if (!Number.isFinite(p) || p <= 0 || p > 65535) return undefined;
-  return p;
-}
-
-function sanitizePortForward(rec: PortForwardRecord) {
-  return {
-    id: rec.id,
-    context: rec.context,
-    namespace: rec.namespace,
-    targetType: rec.targetType,
-    targetName: rec.targetName,
-    localPort: rec.localPort,
-    targetPort: rec.targetPort,
-    status: rec.status,
-    startedAt: rec.startedAt,
-    stoppedAt: rec.stoppedAt,
-    pid: rec.pid,
-    message: rec.message,
-    output: rec.output,
-  };
-}
-
-function stopPortForwardSession(rec: PortForwardRecord) {
-  const p = rec.proc;
-  if (!p || p.killed) return;
-  try {
-    p.kill('SIGTERM');
-  } catch {
-    // Ignore process kill errors.
-  }
-  setTimeout(() => {
-    try {
-      if (!p.killed) p.kill('SIGKILL');
-    } catch {
-      // Ignore process kill errors.
-    }
-  }, 1200);
-}
 
 // --- Plugin IPC handlers ---
 
@@ -1222,76 +1001,156 @@ function assertFileTransferSender(event: Electron.IpcMainInvokeEvent): void {
   }
 }
 
+// Legacy (pre-consent) enable map. Only read, to migrate explicit disables.
 function getEnabledMapPath(): string {
   return path.join(getPluginsDir(), 'enabled.json');
 }
 
-function readEnabledMap(): Record<string, boolean> {
+function readEnabledMap(): Record<string, unknown> {
   try {
-    return JSON.parse(fs.readFileSync(getEnabledMapPath(), 'utf8')) as Record<string, boolean>;
+    return JSON.parse(fs.readFileSync(getEnabledMapPath(), 'utf8')) as Record<string, unknown>;
   } catch {
     return {};
   }
 }
 
-function writeEnabledMap(map: Record<string, boolean>): void {
-  const dir = getPluginsDir();
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(getEnabledMapPath(), JSON.stringify(map, null, 2), { encoding: 'utf8', mode: 0o600 });
+// Approvals live outside the plugins directory and are only written by main.
+function getApprovalsPath(): string {
+  return path.join(getConfigDir(), APPROVALS_FILE);
 }
 
-// plugin-list: discover plugin directories and return PluginRecord[] compatible objects.
-ipcMain.handle('plugin-list', () => {
-  const pluginsDir = getPluginsDir();
-  const enabledMap = readEnabledMap();
-  const records: unknown[] = [];
+const pluginCaps = new PluginCapabilityRegistry();
 
-  try {
-    const entries = fs.readdirSync(pluginsDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const pluginDir = path.join(pluginsDir, entry.name);
-      const manifestPath = path.join(pluginDir, 'manifest.json');
-      try {
-        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-        const pluginId = manifest.id as string;
-        records.push({
-          manifest,
-          enabled: enabledMap[pluginId] !== false, // enabled by default
-          path: pluginDir,
-          isBuiltin: false,
-        });
-      } catch {
-        // Skip directories without valid manifests.
+// Storage capabilities are per renderer document: drop them when the page
+// navigates (reload), crashes or goes away. The host claims fresh ones on load
+// before it runs any plugin code.
+app.on('web-contents-created', (_event, contents) => {
+  const id = contents.id;
+  contents.on('did-navigate', () => pluginCaps.resetOwner(id));
+  contents.on('render-process-gone', () => pluginCaps.resetOwner(id));
+  contents.on('destroyed', () => pluginCaps.resetOwner(id));
+});
+
+function loadPluginApprovals(discovered: DiscoveredPlugin[]): ApprovalMap {
+  const approvals = readApprovals(getApprovalsPath());
+  const migrated = migrateLegacyEnabledMap(approvals, readEnabledMap(), discovered);
+  if (migrated.changed) writeApprovals(getApprovalsPath(), migrated.approvals);
+  return migrated.approvals;
+}
+
+function readApprovedPlugin(pluginId: string): DiscoveredPlugin | null {
+  resolvePluginDir(pluginId); // validates the id
+  const plugin = readPluginFromDisk(getPluginsDir(), pluginId);
+  const approvals = readApprovals(getApprovalsPath());
+  return evaluateConsent(approvals[pluginId], plugin.fingerprint).status === 'approved' ? plugin : null;
+}
+
+// Resolve the plugin a storage call is for from its capability token. The
+// renderer never names the plugin, so plugin A cannot act as plugin B.
+function requirePluginCapability(event: Electron.IpcMainInvokeEvent, capability: unknown): string {
+  assertTrustedSender(event);
+  const pluginId = pluginCaps.resolve(event.sender.id, capability);
+  if (!pluginId) throw new Error('Invalid plugin storage capability');
+  if (readApprovals(getApprovalsPath())[pluginId]?.decision !== 'approved') {
+    pluginCaps.revokePlugin(pluginId);
+    throw new Error(`Plugin "${pluginId}" is not approved`);
+  }
+  return pluginId;
+}
+
+// plugin-list: discover plugin directories and return PluginRecord[] compatible
+// objects. Third-party plugins are enabled only when approved and unchanged.
+ipcMain.handle('plugin-list', (event) => {
+  assertTrustedSender(event);
+  const discovered = discoverPluginsOnDisk(getPluginsDir());
+  return buildPluginRecords(discovered, loadPluginApprovals(discovered));
+});
+
+// plugin-load: return the approved entry code (the exact bytes that were
+// fingerprinted) and a storage capability for each requested plugin. A
+// capability is minted at most once per plugin per renderer document; the host
+// requests all of them in one call before executing any plugin code.
+ipcMain.handle('plugin-load', (event, pluginIds: unknown) => {
+  assertTrustedSender(event);
+  if (!Array.isArray(pluginIds)) throw new Error('pluginIds must be an array');
+  return pluginIds.map((pluginId) => {
+    if (typeof pluginId !== 'string') return { pluginId: String(pluginId), error: 'Invalid plugin id' };
+    try {
+      const plugin = readApprovedPlugin(pluginId);
+      if (!plugin || plugin.entryCode === null) {
+        return { pluginId, error: 'Plugin is not approved or has changed since approval' };
       }
+      return { pluginId, code: plugin.entryCode, capability: pluginCaps.issue(event.sender.id, pluginId) };
+    } catch (err) {
+      return { pluginId, error: err instanceof Error ? err.message : String(err) };
     }
-  } catch {
-    // plugins directory doesn't exist yet — return empty list.
+  });
+});
+
+// plugin-set-approval: the only way to change a plugin's consent. Approving
+// always ends in a native confirmation dialog rendered by main, which renderer
+// script (including already-loaded plugin code) cannot click; a renderer-side
+// user-gesture check could be satisfied by synthetic events. Keeping a plugin
+// disabled needs no confirmation because it only reduces privilege.
+ipcMain.handle('plugin-set-approval', async (event, pluginId: string, approve: boolean) => {
+  assertTrustedSender(event);
+  resolvePluginDir(pluginId);
+  const plugin = readPluginFromDisk(getPluginsDir(), pluginId);
+  if (!plugin.manifest) throw new Error(`Plugin "${pluginId}" not found`);
+  const approvals = readApprovals(getApprovalsPath());
+
+  if (approve !== true) {
+    writeApprovals(getApprovalsPath(), recordDecision(approvals, plugin, 'denied'));
+    pluginCaps.revokePlugin(pluginId);
+    return { approved: false };
   }
 
-  return records;
+  if (!plugin.fingerprint) throw new Error(plugin.error || `Plugin "${pluginId}" cannot be read`);
+  const name = typeof plugin.manifest.name === 'string' ? plugin.manifest.name : pluginId;
+  const version = typeof plugin.manifest.version === 'string' ? ` v${plugin.manifest.version}` : '';
+  const parent = BrowserWindow.fromWebContents(event.sender);
+  const opts: Electron.MessageBoxOptions = {
+    type: 'warning',
+    buttons: ['Keep disabled', 'Enable plugin'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    title: 'Enable plugin',
+    message: `Enable "${name}"${version}?`,
+    detail: `Folder: ${plugin.path}\nFingerprint: ${plugin.fingerprint.slice(0, 16)}\n\n`
+      + 'Plugins run inside Truss with access to your clusters. Only enable plugins you trust.',
+  };
+  const { response } = parent ? await dialog.showMessageBox(parent, opts) : await dialog.showMessageBox(opts);
+  if (response !== 1) return { approved: false, cancelled: true };
+
+  // Re-read after the dialog so we pin exactly what is on disk now.
+  const current = readPluginFromDisk(getPluginsDir(), pluginId);
+  if (current.fingerprint !== plugin.fingerprint) {
+    throw new Error(`Plugin "${pluginId}" changed while awaiting confirmation; try again`);
+  }
+  writeApprovals(getApprovalsPath(), recordDecision(readApprovals(getApprovalsPath()), current, 'approved'));
+  pluginCaps.revokePlugin(pluginId);
+  return {
+    approved: true,
+    code: current.entryCode,
+    capability: pluginCaps.issue(event.sender.id, pluginId),
+  };
 });
 
-// plugin-read-file: read a file from within a plugin's directory.
-// Path traversal protection: lexical check first, then symlink-resolved check.
-ipcMain.handle('plugin-read-file', (_event, pluginId: string, relativePath: string) => {
-  const pluginDir = resolvePluginDir(pluginId);
-  return readPluginFileUtf8(pluginDir, relativePath);
-});
-
-// plugin-storage-get: read a key from a plugin's persistent storage.
-ipcMain.handle('plugin-storage-get', (_event, pluginId: string, key: string) => {
+// plugin-storage-*: per-plugin JSON storage, keyed by the caller's capability.
+ipcMain.handle('plugin-storage-get', (event, capability: unknown, key: string) => {
+  const pluginId = requirePluginCapability(event, capability);
   const storagePath = path.join(resolvePluginDir(pluginId), 'storage.json');
   try {
     const data = JSON.parse(fs.readFileSync(storagePath, 'utf8')) as Record<string, unknown>;
-    return data[key] ?? null;
+    return Object.prototype.hasOwnProperty.call(data, key) ? data[key] ?? null : null;
   } catch {
     return null;
   }
 });
 
-// plugin-storage-set: write a key to a plugin's persistent storage.
-ipcMain.handle('plugin-storage-set', (_event, pluginId: string, key: string, value: unknown) => {
+ipcMain.handle('plugin-storage-set', (event, capability: unknown, key: string, value: unknown) => {
+  const pluginId = requirePluginCapability(event, capability);
   const pluginDir = resolvePluginDir(pluginId);
   const storagePath = path.join(pluginDir, 'storage.json');
   fs.mkdirSync(pluginDir, { recursive: true, mode: 0o700 });
@@ -1301,8 +1160,8 @@ ipcMain.handle('plugin-storage-set', (_event, pluginId: string, key: string, val
   fs.writeFileSync(storagePath, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
 });
 
-// plugin-storage-delete: remove a key from a plugin's persistent storage.
-ipcMain.handle('plugin-storage-delete', (_event, pluginId: string, key: string) => {
+ipcMain.handle('plugin-storage-delete', (event, capability: unknown, key: string) => {
+  const pluginId = requirePluginCapability(event, capability);
   const storagePath = path.join(resolvePluginDir(pluginId), 'storage.json');
   try {
     const data = JSON.parse(fs.readFileSync(storagePath, 'utf8')) as Record<string, unknown>;
@@ -1311,15 +1170,30 @@ ipcMain.handle('plugin-storage-delete', (_event, pluginId: string, key: string) 
   } catch { /* nothing to delete */ }
 });
 
-// plugin-set-enabled: enable or disable a plugin by id.
-ipcMain.handle('plugin-set-enabled', (_event, pluginId: string, enabled: boolean) => {
-  const map = readEnabledMap();
-  map[pluginId] = enabled;
-  writeEnabledMap(map);
+// plugin-secure-storage: forwarded to trussd by main with the bound plugin id
+// and the main-only plugin storage secret.
+ipcMain.handle('plugin-secure-storage', async (event, capability: unknown, op: string, key: string, value?: unknown) => {
+  const pluginId = requirePluginCapability(event, capability);
+  if (op !== 'get' && op !== 'set' && op !== 'delete') throw new Error('Invalid secure storage operation');
+  const access = getDaemonMainAccess();
+  if (!access) throw new Error('Daemon is not running');
+  const body: { plugin_id: string; key: string; value?: unknown } = { plugin_id: pluginId, key };
+  if (op === 'set') body.value = value;
+  const res = await pluginSecureStorageRequest(
+    { port: access.port, token: access.token, mainToken: access.mainToken },
+    op,
+    body,
+  );
+  if (res.status < 200 || res.status >= 300) {
+    if (op === 'get') return null;
+    throw new Error(typeof res.data.error === 'string' ? res.data.error : `Secure storage failed (HTTP ${res.status})`);
+  }
+  return op === 'get' ? (res.data.value ?? null) : undefined;
 });
 
 // open-plugin-directory: open the plugins folder in the system file manager.
-ipcMain.handle('open-plugin-directory', async () => {
+ipcMain.handle('open-plugin-directory', async (event) => {
+  assertTrustedSender(event);
   const dir = getPluginsDir();
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const err = await shell.openPath(dir);
@@ -1357,12 +1231,30 @@ ipcMain.handle('local-fs-home', (event) => {
   return os.homedir();
 });
 
+// Download destination roots approved by the user (the local folder that was
+// open when they started a download), per webContents. local-fs-save and
+// local-fs-mkdir refuse to write anywhere else.
+const approvedDownloadRoots = new ApprovedRoots();
+
+// Begin a pod -> local download into `destDir` (the folder shown in the local pane).
+ipcMain.handle('local-fs-begin-download', (event, destDir: string) => {
+  assertFileTransferSender(event);
+  const sender = event.sender;
+  const id = sender.id;
+  if (approvedDownloadRoots.get(id) === undefined) {
+    sender.once('destroyed', () => approvedDownloadRoots.clear(id));
+  }
+  approvedDownloadRoots.approve(id, destDir);
+});
+
 // Save a file to local disk (data as Uint8Array/Buffer from renderer).
 ipcMain.handle('local-fs-save', (event, filePath: string, data: Buffer | Uint8Array) => {
   assertFileTransferSender(event);
-  const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(filePath, Buffer.isBuffer(data) ? data : Buffer.from(data));
+  const target = assertInsideApprovedRoot(filePath, approvedDownloadRoots.get(event.sender.id));
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  // Re-check after creating parents in case a symlink was swapped in.
+  assertInsideApprovedRoot(target, approvedDownloadRoots.get(event.sender.id));
+  fs.writeFileSync(target, Buffer.isBuffer(data) ? data : Buffer.from(data));
 });
 
 // Read a local file for upload; returns a Buffer (received as Uint8Array in renderer).
@@ -1374,7 +1266,8 @@ ipcMain.handle('local-fs-read', (event, filePath: string) => {
 // Create a local directory.
 ipcMain.handle('local-fs-mkdir', (event, dirPath: string) => {
   assertFileTransferSender(event);
-  fs.mkdirSync(dirPath, { recursive: true });
+  const target = assertInsideApprovedRoot(dirPath, approvedDownloadRoots.get(event.sender.id));
+  fs.mkdirSync(target, { recursive: true });
 });
 
 // Open a file-transfer window for a given pod, one window per context:namespace:pod.
@@ -1470,12 +1363,16 @@ ipcMain.handle(
   },
 );
 
-ipcMain.handle('clipboard-write-text', (_event, text: string) => {
+ipcMain.handle('clipboard-write-text', (event, text: string) => {
+  assertTrustedSender(event);
   clipboard.writeText(text ?? '');
   return { ok: true };
 });
 
-ipcMain.handle('clipboard-read-text', () => clipboard.readText());
+ipcMain.handle('clipboard-read-text', (event) => {
+  assertTrustedSender(event);
+  return clipboard.readText();
+});
 
 // Open YAML content in the system default editor using a temp file.
 ipcMain.handle(
@@ -1615,6 +1512,11 @@ app.whenReady().then(async () => {
     submitURL: '',
     compress: true,
   });
+  installSecurityGuards({
+    devServerUrl: process.env.VITE_DEV_SERVER_URL,
+    indexHtmlPath: path.join(__dirname, '..', 'renderer', 'index.html'),
+    partitions: [EPHEMERAL_PARTITION],
+  });
   wipeTransientUserDataDirs();
   await wipeTransientSessionData();
 
@@ -1627,13 +1529,19 @@ app.whenReady().then(async () => {
     }
   });
 
-  try {
-    console.log('Starting trussd daemon...');
-    daemonConfig = await startDaemon({ pathHints: preferences.execPathHints });
-    console.log(`Daemon running on port ${daemonConfig.port}`);
-  } catch (err) {
-    console.error('Failed to start daemon:', err);
-  }
+  console.log('Starting trussd daemon...');
+  // Resolves after the first attempt; on failure the supervisor keeps retrying
+  // with backoff and windows learn about it through 'daemon-state'.
+  await startDaemonSupervisor(
+    () => ({ pathHints: preferences.execPathHints }),
+    (state) => {
+      portForwards.onDaemonState(state);
+      broadcastToAllWindows('daemon-state', state);
+    },
+  );
+
+  powerMonitor.on('resume', () => handleSystemResume('resume'));
+  powerMonitor.on('unlock-screen', () => handleSystemResume('unlock-screen'));
 
   await createWindow();
 
@@ -1687,10 +1595,7 @@ app.on('before-quit', () => {
     portForwardWindow.close();
   }
   portForwardWindow = null;
-  for (const pf of portForwards.values()) {
-    stopPortForwardSession(pf);
-  }
-  portForwards.clear();
+  portForwards.shutdown();
   trustedFileTransferSenders.clear();
   wipeTransientUserDataDirs();
   void wipeTransientSessionData();

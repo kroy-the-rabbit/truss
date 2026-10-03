@@ -3,11 +3,28 @@ import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('electronAPI', {
   getAppInfo: () => ipcRenderer.invoke('get-app-info'),
   getDaemonConfig: () => ipcRenderer.invoke('get-daemon-config'),
+  getDaemonState: () => ipcRenderer.invoke('get-daemon-state'),
+  onDaemonState: (callback: (state: {
+    status: 'starting' | 'ready' | 'restarting' | 'failed';
+    epoch: number;
+    error?: string;
+  }) => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      state: { status: 'starting' | 'ready' | 'restarting' | 'failed'; epoch: number; error?: string },
+    ) => callback(state);
+    ipcRenderer.on('daemon-state', handler);
+    return () => ipcRenderer.removeListener('daemon-state', handler);
+  },
+  onSystemResume: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on('system-resume', handler);
+    return () => ipcRenderer.removeListener('system-resume', handler);
+  },
   getPreferences: () => ipcRenderer.invoke('get-preferences'),
   setExecPathHints: (pathHints: string[]) => ipcRenderer.invoke('set-exec-path-hints', pathHints),
   setEventSuppressionRules: (rules: string[]) => ipcRenderer.invoke('set-event-suppression-rules', rules),
   setThemeMode: (mode: 'system' | 'light' | 'dark' | 'user-css') => ipcRenderer.invoke('set-theme-mode', mode),
-  openExternalTerminal: (opts: Record<string, unknown>) => ipcRenderer.invoke('open-external-terminal', opts),
   openSessionWindow: (opts: { kind: 'logs' | 'exec'; context: string; namespace: string; pod: string; container: string }) =>
     ipcRenderer.invoke('open-session-window', opts),
   openPortForwardWindow: (opts?: {
@@ -78,6 +95,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localFsSave: (filePath: string, data: ArrayBuffer) => ipcRenderer.invoke('local-fs-save', filePath, data),
   localFsRead: (filePath: string) => ipcRenderer.invoke('local-fs-read', filePath),
   localFsMkdir: (dirPath: string) => ipcRenderer.invoke('local-fs-mkdir', dirPath),
+  localFsBeginDownload: (destDir: string) => ipcRenderer.invoke('local-fs-begin-download', destDir),
   openFileTransferWindow: (opts: { context: string; namespace: string; pod: string; container: string }) =>
     ipcRenderer.invoke('open-filetransfer-window', opts),
   sessionLogAppend: (
@@ -110,15 +128,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Plugin IPC
   pluginList: () => ipcRenderer.invoke('plugin-list'),
-  pluginReadFile: (pluginId: string, relativePath: string) =>
-    ipcRenderer.invoke('plugin-read-file', pluginId, relativePath),
-  pluginStorageGet: (pluginId: string, key: string) =>
-    ipcRenderer.invoke('plugin-storage-get', pluginId, key),
-  pluginStorageSet: (pluginId: string, key: string, value: unknown) =>
-    ipcRenderer.invoke('plugin-storage-set', pluginId, key, value),
-  pluginStorageDelete: (pluginId: string, key: string) =>
-    ipcRenderer.invoke('plugin-storage-delete', pluginId, key),
-  pluginSetEnabled: (pluginId: string, enabled: boolean) =>
-    ipcRenderer.invoke('plugin-set-enabled', pluginId, enabled),
+  // Returns approved entry code plus a one-time per-plugin storage capability.
+  pluginLoad: (pluginIds: string[]) => ipcRenderer.invoke('plugin-load', pluginIds),
+  // Storage calls carry the opaque capability, never a plugin id.
+  pluginStorageGet: (capability: string, key: string) =>
+    ipcRenderer.invoke('plugin-storage-get', capability, key),
+  pluginStorageSet: (capability: string, key: string, value: unknown) =>
+    ipcRenderer.invoke('plugin-storage-set', capability, key, value),
+  pluginStorageDelete: (capability: string, key: string) =>
+    ipcRenderer.invoke('plugin-storage-delete', capability, key),
+  pluginSecureStorage: (capability: string, op: 'get' | 'set' | 'delete', key: string, value?: unknown) =>
+    ipcRenderer.invoke('plugin-secure-storage', capability, op, key, value),
+  // Approving always shows a native confirmation dialog in main.
+  pluginSetApproval: (pluginId: string, approve: boolean) =>
+    ipcRenderer.invoke('plugin-set-approval', pluginId, approve),
   openPluginDirectory: () => ipcRenderer.invoke('open-plugin-directory'),
 });

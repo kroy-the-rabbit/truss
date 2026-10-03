@@ -3,19 +3,13 @@ import { useAppStore } from '../state/store';
 import { useResourceKinds, useResourceCounts } from '../state/queries';
 import { GVR } from '../api/gen/truss/v1/resources_pb';
 import { useTreeSections } from '../plugins/hooks';
-import { createPluginAPI } from '../plugins/api';
-
-function isRbacDeniedError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err ?? '');
-  const lower = msg.toLowerCase();
-  return lower.includes('forbidden') || lower.includes('permission denied') || lower.includes('rbac');
-}
+import { pluginRegistry } from '../plugins/registry';
+import { isAuthError, isRbacDeniedError } from '../lib/connectErrors';
 
 export function ResourceTree() {
   const { activeContext, activeNamespace, setSelectedKind, selectedKindLabel, activePane, setActivePane } = useAppStore();
   const resourceKinds = useResourceKinds(activeContext);
   const treeSections = useTreeSections();
-  const pluginApi = useMemo(() => createPluginAPI('@truss/builtin'), []);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set(['Workloads', 'Config', 'Networking']));
   const [collapsedCustomOwners, setCollapsedCustomOwners] = useState<Set<string>>(new Set());
   const [discoveryElapsedSec, setDiscoveryElapsedSec] = useState(0);
@@ -256,6 +250,11 @@ export function ResourceTree() {
             Your current credentials may not be allowed to query Kubernetes discovery APIs.
           </div>
         )}
+        {isAuthError(resourceKinds.error) && (
+          <div style={{ marginTop: 8, opacity: 0.8 }}>
+            Sign-in required for this cluster. See the banner above.
+          </div>
+        )}
       </div>
     );
   }
@@ -372,7 +371,7 @@ export function ResourceTree() {
       ))}
       {treeSections.map((section) => (
         <React.Fragment key={section.id}>
-          {section.render({ api: pluginApi })}
+          {section.render({ api: pluginRegistry.apiFor(section._pluginId) })}
         </React.Fragment>
       ))}
     </div>

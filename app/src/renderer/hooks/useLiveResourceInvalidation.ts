@@ -1,22 +1,34 @@
 import { useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAppStore } from '../state/store';
+import {
+  type ContextHealth,
+  fetchContextHealth,
+  isAuthBlocked,
+  recordContextHealth,
+  useContextHealthStore,
+} from '../state/contextHealth';
+import { useConnectionStore } from '../state/connectionStore';
+import { createBackoff } from '../lib/backoff';
 
 type WatchMessage = {
   type?: string;
+  reason?: string;
   group?: string;
   version?: string;
   resource?: string;
   namespace?: string;
   name?: string;
   verb?: string;
+  health?: ContextHealth;
 };
 
-const RECONNECT_MS = 2000;
+// Reconnect with jittered exponential backoff (0.5s → 30s), reset once a
+// socket has stayed up for 30s.
+export const WATCH_BACKOFF = { baseMs: 500, capMs: 30000, stableMs: 30000 } as const;
 const FLUSH_DEBOUNCE_MS = 250;
 const HEARTBEAT_CHECK_MS = 10000;
 const HEARTBEAT_TIMEOUT_MS = 55000;
-const FOREGROUND_REFETCH_AFTER_MS = 30000;
 
 function keyStr(v: unknown): string {
   return typeof v === 'string' ? v : '';
@@ -74,7 +86,10 @@ export function useLiveResourceInvalidation() {
   const selectedResourceNamespaceRef = useRef(selectedResourceNamespace);
   const selectedKindLabelRef = useRef(selectedKindLabel);
   const selectedKindRef = useRef(selectedKind);
-  const lastWatchMessageAtRef = useRef(0);
+  // While the active context needs sign-in, keep the socket down instead of
+  // re-running the exec plugin on every reconnect. Reconnect once it clears.
+  const authBlocked = useContextHealthStore((s) => isAuthBlocked(s.byContext[activeContext]));
+  const wasAuthBlockedRef = useRef(false);
 
   useEffect(() => {
     selectedResourceRef.current = selectedResource;
@@ -88,9 +103,22 @@ export function useLiveResourceInvalidation() {
       setLiveUpdatesConnected(false);
       return;
     }
+    if (authBlocked) {
+      wasAuthBlockedRef.current = true;
+      setLiveUpdatesConnected(false);
+      return;
+    }
+    const recoveredFromAuth = wasAuthBlockedRef.current;
+    wasAuthBlockedRef.current = false;
 
     let cancelled = false;
     let ws: WebSocket | null = null;
+    const backoff = createBackoff(WATCH_BACKOFF);
+    // Opens in this effect run. Every open after the first may have missed
+    // events while the socket was down, so it triggers a full invalidation.
+    let openCount = 0;
+    // Guards against two overlapping connect() calls both opening a socket.
+    let connectSeq = 0;
 
     const pending = {
       overview: false,
@@ -269,11 +297,18 @@ export function useLiveResourceInvalidation() {
     };
 
     const connect = async () => {
+      const seq = ++connectSeq;
       try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const api = (window as any).electronAPI;
+        // Always read the current port/token: they change when the daemon restarts.
         const cfg = await api?.getDaemonConfig?.();
-        if (!cfg || cancelled) {
+        if (cancelled || seq !== connectSeq) return;
+        if (!cfg) {
+          // Daemon not ready (starting/restarting): keep retrying. A daemon
+          // "ready" event also reconnects immediately.
           setLiveUpdatesConnected(false);
+          scheduleReconnect();
           return;
         }
 
@@ -285,7 +320,7 @@ export function useLiveResourceInvalidation() {
         );
         ws = nextWs;
         let lastMessageAt = Date.now();
-        lastWatchMessageAtRef.current = lastMessageAt;
+        let opened = false;
 
         if (heartbeatTimerRef.current !== null) {
           window.clearInterval(heartbeatTimerRef.current);
@@ -293,9 +328,15 @@ export function useLiveResourceInvalidation() {
         }
 
         nextWs.onopen = () => {
-          if (!cancelled) {
+          opened = true;
+          if (!cancelled && ws === nextWs) {
             lastMessageAt = Date.now();
-            lastWatchMessageAtRef.current = lastMessageAt;
+            backoff.markConnected();
+            if (openCount > 0) {
+              // Reconnected: anything that changed while the socket was down was missed.
+              invalidateActiveContextQueries();
+            }
+            openCount++;
             setLiveUpdatesConnected(true);
             heartbeatTimerRef.current = window.setInterval(() => {
               if (cancelled || nextWs.readyState !== WebSocket.OPEN) return;
@@ -307,13 +348,23 @@ export function useLiveResourceInvalidation() {
         };
 
         nextWs.onmessage = (evt) => {
-          if (cancelled) return;
+          if (cancelled || ws !== nextWs) return;
           lastMessageAt = Date.now();
-          lastWatchMessageAtRef.current = lastMessageAt;
           let msg: WatchMessage | null = null;
           try {
             msg = JSON.parse(String(evt.data));
           } catch {
+            return;
+          }
+          if (msg && msg.type === 'health' && msg.health) {
+            const h = msg.health;
+            recordContextHealth({ ...h, context: h.context || activeContext }, qc);
+            return;
+          }
+          if (msg && msg.type === 'resync') {
+            // The daemon dropped events for this socket: targeted invalidation
+            // can no longer be trusted, so refetch everything for the context.
+            invalidateActiveContextQueries();
             return;
           }
           if (!msg || msg.type !== 'resource') return;
@@ -396,57 +447,104 @@ export function useLiveResourceInvalidation() {
         };
 
         nextWs.onerror = () => {
-          setLiveUpdatesConnected(false);
+          if (ws === nextWs) setLiveUpdatesConnected(false);
         };
 
         nextWs.onclose = () => {
+          // A socket replaced by reconnectNow() must not schedule another one.
+          if (ws !== nextWs) return;
+          ws = null;
           setLiveUpdatesConnected(false);
           if (heartbeatTimerRef.current !== null) {
             window.clearInterval(heartbeatTimerRef.current);
             heartbeatTimerRef.current = null;
           }
           if (cancelled) return;
-          reconnectTimerRef.current = window.setTimeout(() => {
-            void connect();
-          }, RECONNECT_MS);
+          if (!opened) {
+            // The upgrade was rejected (e.g. HTTP 401 when the context needs
+            // sign-in); browsers hide the status, so ask the daemon why.
+            void checkHealthThenReconnect();
+            return;
+          }
+          scheduleReconnect();
         };
       } catch {
+        if (cancelled || seq !== connectSeq) return;
         setLiveUpdatesConnected(false);
-        if (!cancelled) {
-          reconnectTimerRef.current = window.setTimeout(() => {
-            void connect();
-          }, RECONNECT_MS);
-        }
+        scheduleReconnect();
       }
     };
 
+    const scheduleReconnect = () => {
+      if (cancelled) return;
+      if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        void connect();
+      }, backoff.next());
+    };
+
+    /** Drop the current socket (if any) and connect again right away. */
+    const reconnectNow = () => {
+      if (cancelled) return;
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      backoff.reset();
+      const old = ws;
+      ws = null;
+      if (old && (old.readyState === WebSocket.OPEN || old.readyState === WebSocket.CONNECTING)) {
+        old.close();
+      }
+      if (heartbeatTimerRef.current !== null) {
+        window.clearInterval(heartbeatTimerRef.current);
+        heartbeatTimerRef.current = null;
+      }
+      setLiveUpdatesConnected(false);
+      // Count the next open as a reconnect so it refetches what was missed.
+      if (openCount === 0) openCount = 1;
+      void connect();
+    };
+
+    const checkHealthThenReconnect = async () => {
+      try {
+        const health = await fetchContextHealth(activeContext);
+        if (cancelled) return;
+        recordContextHealth(health, qc);
+        // Recording an AUTH_* state re-runs this effect, which stays offline.
+        if (isAuthBlocked(health)) return;
+      } catch {
+        // Health endpoint unavailable — fall back to plain reconnect.
+      }
+      scheduleReconnect();
+    };
+
+    if (recoveredFromAuth) {
+      invalidateActiveContextQueries();
+    }
     void connect();
 
-    let lastForegroundRefetchAt = 0;
-    const handleForeground = () => {
-      if (document.visibilityState === 'hidden') return;
-      const now = Date.now();
-      if (now - lastForegroundRefetchAt < FOREGROUND_REFETCH_AFTER_MS) return;
-      if (lastWatchMessageAtRef.current > 0 && now - lastWatchMessageAtRef.current < FOREGROUND_REFETCH_AFTER_MS) return;
-      lastForegroundRefetchAt = now;
-      invalidateActiveContextQueries();
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close();
-      }
-    };
-
-    window.addEventListener('focus', handleForeground);
-    document.addEventListener('visibilitychange', handleForeground);
+    // Daemon restarts and system resume (sleep/wake) replace the old focus
+    // heuristic: reconnect immediately instead of waiting out the backoff.
+    const unsubscribeConnection = useConnectionStore.subscribe((state, prev) => {
+      const epochChanged = state.daemon.epoch !== prev.daemon.epoch;
+      const becameReady = state.daemon.status === 'ready' && prev.daemon.status !== 'ready';
+      const resumed = state.lastResumeAt !== prev.lastResumeAt;
+      if (state.daemon.status !== 'ready' && !resumed) return;
+      if (epochChanged || becameReady || resumed) reconnectNow();
+    });
 
     return () => {
       cancelled = true;
+      unsubscribeConnection();
       setLiveUpdatesConnected(false);
-      window.removeEventListener('focus', handleForeground);
-      document.removeEventListener('visibilitychange', handleForeground);
       clearTimers();
-      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-        ws.close();
+      const old = ws;
+      ws = null;
+      if (old && (old.readyState === WebSocket.OPEN || old.readyState === WebSocket.CONNECTING)) {
+        old.close();
       }
     };
-  }, [qc, activeContext, activeNamespace, setLiveUpdatesConnected]);
+  }, [qc, activeContext, activeNamespace, setLiveUpdatesConnected, authBlocked]);
 }

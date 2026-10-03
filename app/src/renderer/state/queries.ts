@@ -12,11 +12,24 @@ import {
 } from '../api/client';
 import type { GVR } from '../api/gen/truss/v1/resources_pb';
 import { useAppStore } from './store';
+import { friendlyErrorMessage } from '../api/readOnlyErrors';
+
+/** Raised when a context does not answer in time (often an exec plugin waiting on a browser login). */
+export class ContextTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ContextTimeoutError';
+  }
+}
+
+export function isContextTimeoutError(err: unknown): boolean {
+  return err instanceof ContextTimeoutError;
+}
 
 async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
   const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(() => reject(new Error(message)), ms);
+    timeoutHandle = setTimeout(() => reject(new ContextTimeoutError(message)), ms);
   });
   try {
     return await Promise.race([promise, timeoutPromise]);
@@ -82,6 +95,14 @@ export function invalidateHelmViews(queryClient: QueryInvalidator, opts: { conte
   });
 }
 
+/** Refresh everything that was loaded (or failed) for a context once it is healthy again. */
+export function invalidateContextAfterRecovery(qc: QueryClient, context: string) {
+  invalidateResourceViews(qc, { context });
+  invalidateHelmViews(qc, { context });
+  qc.invalidateQueries({ queryKey: ['resourceKinds', context] });
+  qc.invalidateQueries({ queryKey: ['contextPreflight', context] });
+}
+
 export function usePing() {
   return useQuery({
     queryKey: ['ping'],
@@ -89,9 +110,10 @@ export function usePing() {
       const client = await getHealthClient();
       return client.ping({});
     },
-    retry: true,
-    retryDelay: 1000,
-    refetchInterval: 30000,
+    // No silent retries: a failed ping must surface (TopBar turns red), and the
+    // short error-state interval brings it back as soon as the daemon answers.
+    retry: false,
+    refetchInterval: (query) => (query.state.status === 'error' ? 3000 : 15000),
   });
 }
 
@@ -756,7 +778,7 @@ export function useDebugNode() {
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({ error: 'unknown error' })) as { error?: string };
-        throw new Error(err.error ?? 'failed to create debug pod');
+        throw new Error(friendlyErrorMessage(err.error ?? 'failed to create debug pod'));
       }
       return r.json();
     },
@@ -774,7 +796,7 @@ export function useDeleteDebugPod() {
       const r = await fetchSetupAPI(`/api/nodes/debug/delete?${qs}`, { method: 'DELETE' });
       if (!r.ok) {
         const err = await r.json().catch(() => ({ error: 'unknown error' })) as { error?: string };
-        throw new Error(err.error ?? 'failed to delete debug pod');
+        throw new Error(friendlyErrorMessage(err.error ?? 'failed to delete debug pod'));
       }
     },
     onSuccess: (_data, params) => {

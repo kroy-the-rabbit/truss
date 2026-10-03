@@ -43,10 +43,10 @@ func tokenFromWSProtocolHeader(protocolHeader string) string {
 	if protocolHeader == "" {
 		return ""
 	}
-	for _, item := range strings.Split(protocolHeader, ",") {
+	for item := range strings.SplitSeq(protocolHeader, ",") {
 		p := strings.TrimSpace(item)
-		if strings.HasPrefix(p, "truss-token-") {
-			return strings.TrimPrefix(p, "truss-token-")
+		if after, ok := strings.CutPrefix(p, "truss-token-"); ok {
+			return after
 		}
 	}
 	return ""

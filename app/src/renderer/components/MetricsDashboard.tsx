@@ -16,6 +16,7 @@ import { MetricsLineChart } from './MetricsLineChart';
 import { GVR } from '../api/gen/truss/v1/resources_pb';
 import type { Resource } from '../api/gen/truss/v1/resources_pb';
 import type { GetClusterOverviewResponse } from '../api/gen/truss/v1/overview_pb';
+import { describeQueryError } from '../lib/connectErrors';
 
 // PromQL queries
 const CPU_RANGE_QUERY = `sum(rate(container_cpu_usage_seconds_total{container!="",container!="POD"}[5m]))`;
@@ -441,6 +442,7 @@ function NodesTab({
   const [debuggingNodes, setDebuggingNodes] = useState<Record<string, boolean>>({});
 
   const addToast = useToast((s) => s.addToast);
+  const readOnly = useAppStore((s) => s.readOnly);
   const debugNode = useDebugNode();
   const deleteDebugPod = useDeleteDebugPod();
 
@@ -464,6 +466,7 @@ function NodesTab({
   };
 
   const handleDebugNode = async (nodeName: string) => {
+    if (readOnly) return;
     setDebuggingNodes((prev) => ({ ...prev, [nodeName]: true }));
     try {
       const result = await debugNode.mutateAsync({ context: activeContext, node: nodeName });
@@ -571,8 +574,10 @@ function NodesTab({
                     <td onClick={(e) => e.stopPropagation()}>
                       <button
                         className="btn-secondary metrics-node-debug-btn"
-                        disabled={isDebugging}
-                        title="Create a privileged debug pod on this node and open an exec session"
+                        disabled={readOnly || isDebugging}
+                        title={readOnly
+                          ? 'Node debug creates a privileged pod; switch to Write mode to use it'
+                          : 'Create a privileged debug pod on this node and open an exec session'}
                         onClick={() => handleDebugNode(m.name)}
                       >
                         {isDebugging ? 'Starting…' : '⬡ Exec'}
@@ -627,8 +632,10 @@ function NodesTab({
                                       {isDebugPod && (
                                         <button
                                           className="metrics-node-debug-del-btn"
-                                          title="Delete this debug pod"
+                                          disabled={readOnly}
+                                          title={readOnly ? 'Switch to Write mode to delete this debug pod' : 'Delete this debug pod'}
                                           onClick={async () => {
+                                            if (readOnly) return;
                                             try {
                                               await deleteDebugPod.mutateAsync({ context: activeContext, pod: podName, namespace: podNs });
                                               addToast('success', `Deleted ${podName}`);
@@ -1045,13 +1052,22 @@ export function MetricsDashboard() {
       )}
 
       {/* Tab content */}
-      {tab === 'overview' && (
+      {tab !== 'prometheus' && overview.isError && (
+        <div className="metrics-error-state" role="alert">
+          <div className="metrics-error-state-title">Cluster overview unavailable</div>
+          <div>{describeQueryError(overview.error)}</div>
+          <button className="context-auth-btn" onClick={() => void overview.refetch()} disabled={overview.isFetching}>
+            {overview.isFetching ? 'Retrying…' : 'Retry'}
+          </button>
+        </div>
+      )}
+      {!overview.isError && tab === 'overview' && (
         <OverviewTab overview={overview.data} navToPod={navToPod} navToResource={navToResource} />
       )}
-      {tab === 'nodes' && (
+      {!overview.isError && tab === 'nodes' && (
         <NodesTab overview={overview.data} activeContext={activeContext} navToPod={navToPod} />
       )}
-      {tab === 'workloads' && (
+      {!overview.isError && tab === 'workloads' && (
         <WorkloadsTab overview={overview.data} />
       )}
       {tab === 'prometheus' && (

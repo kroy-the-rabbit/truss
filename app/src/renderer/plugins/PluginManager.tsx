@@ -7,6 +7,7 @@ import { fetchSetupAPI } from '../api/client';
 import { Modal } from '../components/Modal';
 import { DEFAULT_EVENT_SUPPRESSION_RULE_LINES } from '../lib/eventFilters';
 import { useToast } from '../hooks/useToast';
+import { PluginDeclarations, PLUGIN_TRUST_WARNING } from './PluginConsentModal';
 
 interface Props {
   onClose(): void;
@@ -16,52 +17,81 @@ function CapabilityBadge({ cap }: { cap: string }) {
   return <span className="plugin-badge">{cap}</span>;
 }
 
-function PluginCard({ record }: { record: PluginRecord }) {
-  const [toggling, setToggling] = useState(false);
-  const { reload } = usePluginContext();
+const CONSENT_LABELS: Record<string, string> = {
+  approved: 'Approved',
+  pending: 'Awaiting approval',
+  changed: 'Changed since approval',
+  denied: 'Disabled',
+  invalid: 'Invalid',
+};
 
-  const handleToggle = async () => {
-    if (record.isBuiltin) return;
-    setToggling(true);
+export function PluginCard({ record }: { record: PluginRecord }) {
+  const [busy, setBusy] = useState(false);
+  const { approve, deny } = usePluginContext();
+  const approved = record.consent === 'approved';
+
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (window as any).electronAPI?.pluginSetEnabled?.(record.manifest.id, !record.enabled);
-      await reload();
+      await fn();
     } finally {
-      setToggling(false);
+      setBusy(false);
     }
   };
 
   return (
-    <div className={`plugin-card ${!record.enabled ? 'plugin-card-disabled' : ''}`}>
+    <div className={`plugin-card ${!record.enabled ? 'plugin-card-disabled' : ''}`} data-testid={`plugin-card-${record.manifest.id}`}>
       <div className="plugin-card-header">
         <div className="plugin-card-title">
           <span className="plugin-name">{record.manifest.name}</span>
           <span className="plugin-version">v{record.manifest.version}</span>
           {record.isBuiltin && <span className="plugin-badge plugin-badge-builtin">built-in</span>}
+          {!record.isBuiltin && record.consent && (
+            <span className="plugin-badge">{CONSENT_LABELS[record.consent] ?? record.consent}</span>
+          )}
         </div>
-        <label className="plugin-toggle" title={record.isBuiltin ? 'Built-in plugins cannot be disabled' : ''}>
-          <input
-            type="checkbox"
-            checked={record.enabled}
-            disabled={record.isBuiltin || toggling}
-            onChange={handleToggle}
-          />
-          <span className="plugin-toggle-label">{record.enabled ? 'Enabled' : 'Disabled'}</span>
-        </label>
+        {!record.isBuiltin && record.consent !== 'invalid' && (
+          <div className="preferences-actions">
+            {approved ? (
+              <button
+                type="button"
+                className="plugin-open-dir-btn"
+                disabled={busy}
+                onClick={() => run(() => deny(record.manifest.id))}
+                aria-label={`Revoke ${record.manifest.name}`}
+              >
+                Revoke
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="plugin-open-dir-btn"
+                disabled={busy}
+                onClick={() => run(() => approve(record))}
+                aria-label={`Approve ${record.manifest.name}`}
+              >
+                Approve…
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {record.manifest.description && (
         <p className="plugin-description">{record.manifest.description}</p>
       )}
 
-      <div className="plugin-capabilities">
-        {record.manifest.capabilities.map((cap) => (
-          <CapabilityBadge key={cap} cap={cap} />
-        ))}
-      </div>
+      {record.isBuiltin ? (
+        <div className="plugin-capabilities">
+          {record.manifest.capabilities.map((cap) => (
+            <CapabilityBadge key={cap} cap={cap} />
+          ))}
+        </div>
+      ) : (
+        <PluginDeclarations record={record} />
+      )}
 
-      {record.manifest.author && (
+      {record.manifest.author && record.isBuiltin && (
         <div className="plugin-meta">by {record.manifest.author}</div>
       )}
 
@@ -327,6 +357,7 @@ export function PluginManager({ onClose }: Props) {
                     Open Directory
                   </button>
                 </h3>
+                <p className="plugin-consent-warning">{PLUGIN_TRUST_WARNING}</p>
                 {external.length === 0 ? (
                   <p className="plugin-section-empty">
                     No external plugins installed. Drop plugin folders into the plugins directory.

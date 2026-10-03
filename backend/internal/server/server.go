@@ -19,14 +19,17 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/coder/websocket"
 	"github.com/kroy/truss/backend/internal/auth"
 	"github.com/kroy/truss/backend/internal/contextstore"
 	disc "github.com/kroy/truss/backend/internal/discovery"
 	helmclient "github.com/kroy/truss/backend/internal/helm"
 	"github.com/kroy/truss/backend/internal/kube"
+	"github.com/kroy/truss/backend/internal/portforward"
 	"github.com/kroy/truss/backend/internal/summarizer"
 	"github.com/kroy/truss/backend/internal/watchcache"
 	"golang.org/x/net/http2"
@@ -39,9 +42,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
-	"nhooyr.io/websocket"
 	"sigs.k8s.io/yaml"
 
 	pb "github.com/kroy/truss/backend/api/gen/go/truss/v1"
@@ -60,32 +61,48 @@ type Server struct {
 	searchMu       sync.RWMutex
 	searchIndexes  map[string]*searchIndexState
 	watchCache     *watchcache.Manager
+	goneMu         sync.Mutex           // guards goneLast
+	goneLast       map[string]time.Time // last informer rebuild per context; see resource_gone.go
+	portForwards   *portforward.Manager
+	// writeEnabled is false (read-only) by default so the zero value fails
+	// closed; see ReadOnly/SetReadOnly in readonly.go.
+	writeEnabled atomic.Bool
+	// mainToken gates main-process-only endpoints; see mainonly.go.
+	mainToken atomic.Pointer[string]
 }
 
 // New creates a new Server.
 func New(kubeMgr *kube.Manager, store *contextstore.Store, version string) *Server {
-	return &Server{
+	s := &Server{
 		kubeMgr:        kubeMgr,
 		store:          store,
 		discoveryCache: disc.NewCache(),
 		version:        version,
 		searchIndexes:  make(map[string]*searchIndexState),
-		watchCache:     watchcache.New(),
+		watchCache:     newHealthAwareWatchCache(kubeMgr),
 	}
+	s.portForwards = newPortForwardManager(s)
+	s.watchCache.SetResourceGoneHandler(s.handleResourceGone)
+	// The daemon always starts read-only; the UI must opt in to write mode.
+	s.SetReadOnly(true)
+	return s
 }
 
-// Start starts the HTTP server on a random localhost port. Returns the port and any error.
-func (s *Server) Start(token string) (int, error) {
+// newMux registers all Connect services and REST/WebSocket routes. Auth is
+// applied by Start, not here.
+func (s *Server) newMux(token string) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// Register Connect services.
-	mux.Handle(trussv1connect.NewHealthServiceHandler(s))
-	mux.Handle(trussv1connect.NewContextsServiceHandler(s))
-	mux.Handle(trussv1connect.NewDiscoveryServiceHandler(s))
-	mux.Handle(trussv1connect.NewResourcesServiceHandler(s))
-	mux.Handle(trussv1connect.NewYamlServiceHandler(s))
-	mux.Handle(trussv1connect.NewHelmServiceHandler(s))
-	mux.Handle(trussv1connect.NewOverviewServiceHandler(s))
+	// Register Connect services. The read-only interceptor rejects mutating
+	// procedures while the daemon is in read-only mode.
+	connectOpts := connect.WithInterceptors(readOnlyInterceptor{s: s})
+	mux.Handle(trussv1connect.NewHealthServiceHandler(s, connectOpts))
+	mux.Handle(trussv1connect.NewContextsServiceHandler(s, connectOpts))
+	mux.Handle(trussv1connect.NewDiscoveryServiceHandler(s, connectOpts))
+	mux.Handle(trussv1connect.NewResourcesServiceHandler(s, connectOpts))
+	mux.Handle(trussv1connect.NewYamlServiceHandler(s, connectOpts))
+	mux.Handle(trussv1connect.NewHelmServiceHandler(s, connectOpts))
+	mux.Handle(trussv1connect.NewOverviewServiceHandler(s, connectOpts))
 
 	// Register WebSocket exec handler.
 	mux.HandleFunc("/ws/exec", s.handleExecWS(token))
@@ -106,6 +123,11 @@ func (s *Server) Start(token string) (int, error) {
 	mux.HandleFunc("/api/setup/preferences/auto-lock", s.handleSetupAutoLockSet)
 	mux.HandleFunc("/api/setup/preferences/never-confirm-bypass", s.handleSetupNeverConfirmBypassSet)
 	mux.HandleFunc("/api/context-preflight", s.handleContextPreflight)
+	mux.HandleFunc("/api/context-health", s.handleContextHealth)
+	mux.HandleFunc("/api/contexts/reauth", s.handleContextReauth)
+	mux.HandleFunc("/api/contexts/approve-exec", s.handleContextApproveExec)
+	mux.HandleFunc("/api/contexts/revoke-exec", s.handleContextRevokeExec)
+	mux.HandleFunc("/api/contexts/exec-approvals", s.handleContextExecApprovals)
 	mux.HandleFunc("/api/setup/reset", s.handleSetupReset)
 	mux.HandleFunc("/api/gpg-keys", s.handleGPGKeys)
 	mux.HandleFunc("/api/kubeconfig-contexts", s.handleKubeconfigContexts)
@@ -121,6 +143,7 @@ func (s *Server) Start(token string) (int, error) {
 	mux.HandleFunc("/api/plugins/secure-storage/set", s.handlePluginSecureStorageSet)
 	mux.HandleFunc("/api/plugins/secure-storage/delete", s.handlePluginSecureStorageDelete)
 	mux.HandleFunc("/api/search/resources", s.handleSearchResources)
+	mux.HandleFunc("/api/readonly", s.handleReadOnly)
 
 	// Register metrics/observability REST endpoints.
 	mux.HandleFunc("/api/metrics/prometheus/discover", s.handleMetricsDiscover)
@@ -131,6 +154,15 @@ func (s *Server) Start(token string) (int, error) {
 	// Node debug pod endpoints.
 	mux.HandleFunc("/api/nodes/debug", s.handleNodeDebug)
 	mux.HandleFunc("/api/nodes/debug/delete", s.handleNodeDebugDelete)
+
+	s.registerPortForwardRoutes(mux)
+
+	return mux
+}
+
+// Start starts the HTTP server on a random localhost port. Returns the port and any error.
+func (s *Server) Start(token string) (int, error) {
+	mux := s.newMux(token)
 
 	// Wrap with auth middleware.
 	handler := auth.Middleware(token)(mux)
@@ -164,6 +196,9 @@ func (s *Server) Start(token string) (int, error) {
 		}()
 	}
 
+	// Stop informers for unwatched, idle, non-active contexts (never the active one).
+	s.watchCache.StartJanitor(func(name string) bool { return name == s.kubeMgr.ActiveContext() })
+
 	httpServer := &http.Server{Handler: h2cHandler}
 	s.lifecycleMu.Lock()
 	s.httpServer = httpServer
@@ -187,7 +222,8 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.listener = nil
 	s.lifecycleMu.Unlock()
 
-	s.watchCache.StopAll()
+	s.stopAllPortForwards()
+	s.watchCache.Close()
 
 	if httpServer == nil {
 		return nil
@@ -206,13 +242,33 @@ func (s *Server) resolveContext(ctx string) string {
 	return ctx
 }
 
+// restartWatchedInformers restarts informers in the background for a context
+// that still has /ws/watch subscribers after an Invalidate, so they receive a
+// resync and keep streaming.
+func (s *Server) restartWatchedInformers(ctxName string) {
+	if s.watchCache.SubscriberCount(ctxName) == 0 {
+		return
+	}
+	go func() {
+		cs, err := s.kubeMgr.GetClientSet(ctxName)
+		if err != nil {
+			return
+		}
+		s.ensureWatchCache(ctxName, cs)
+	}()
+}
+
 // ensureWatchCache discovers GVRs and starts informers for a context. Idempotent.
 func (s *Server) ensureWatchCache(ctxName string, cs *kube.ClientSet) {
 	resources, err := s.discoveryCache.Discover(ctxName, cs.Discovery, false)
-	if err != nil || len(resources) == 0 {
+	if err != nil {
+		s.kubeMgr.RecordError(ctxName, err)
 		return
 	}
-	s.watchCache.EnsureStarted(ctxName, cs.Dynamic, resources)
+	if len(resources) == 0 {
+		return
+	}
+	s.watchCache.EnsureStarted(ctxName, cs.InformerClient(), resources)
 }
 
 // --- HealthService ---
@@ -275,12 +331,12 @@ func (s *Server) ListNamespaces(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	nsList, err := cs.Clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("listing namespaces: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("listing namespaces: %w", err))
 	}
 
 	var namespaces []*pb.Namespace
@@ -302,12 +358,12 @@ func (s *Server) ListResourceKinds(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	resources, err := s.discoveryCache.Discover(ctxName, cs.Discovery, false)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("discovering resources: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("discovering resources: %w", err))
 	}
 
 	groupMap := make(map[string]*pb.ResourceGroup)
@@ -358,7 +414,7 @@ func (s *Server) ListResources(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -381,7 +437,7 @@ func (s *Server) ListResources(
 			list, err = cs.Dynamic.Resource(gvr).Namespace(ns).List(ctx, metav1.ListOptions{})
 		}
 		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("listing resources: %w", err))
+			return nil, s.toConnectError(ctxName, fmt.Errorf("listing resources: %w", err))
 		}
 		items = list.Items
 		// Ensure informers are running so the next call will be served from cache.
@@ -500,7 +556,7 @@ func (s *Server) GetResource(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -517,7 +573,7 @@ func (s *Server) GetResource(
 		obj, err = cs.Dynamic.Resource(gvr).Namespace(ns).Get(ctx, req.Msg.Name, metav1.GetOptions{})
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting resource: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting resource: %w", err), connect.CodeNotFound)
 	}
 
 	kind := obj.GetKind()
@@ -536,7 +592,7 @@ func (s *Server) DeleteResource(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -557,7 +613,7 @@ func (s *Server) DeleteResource(
 		err = cs.Dynamic.Resource(gvr).Namespace(ns).Delete(ctx, req.Msg.Name, deleteOpts)
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("deleting resource: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("deleting resource: %w", err))
 	}
 
 	return connect.NewResponse(&pb.DeleteResourceResponse{
@@ -573,7 +629,7 @@ func (s *Server) ScaleResource(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -589,14 +645,14 @@ func (s *Server) ScaleResource(
 	// Get current state to read previous replicas.
 	current, err := cs.Dynamic.Resource(gvr).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting resource: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting resource: %w", err), connect.CodeNotFound)
 	}
 	prevReplicas, _, _ := unstructured.NestedInt64(current.Object, "spec", "replicas")
 
-	patch := []byte(fmt.Sprintf(`{"spec":{"replicas":%d}}`, replicas))
+	patch := fmt.Appendf(nil, `{"spec":{"replicas":%d}}`, replicas)
 	_, err = cs.Dynamic.Resource(gvr).Namespace(ns).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("scaling resource: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("scaling resource: %w", err))
 	}
 
 	return connect.NewResponse(&pb.ScaleResourceResponse{
@@ -614,7 +670,7 @@ func (s *Server) RestartResource(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -626,13 +682,13 @@ func (s *Server) RestartResource(
 	ns := req.Msg.Namespace
 	name := req.Msg.Name
 
-	patch := []byte(fmt.Sprintf(
+	patch := fmt.Appendf(nil,
 		`{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"%s"}}}}}`,
 		time.Now().Format(time.RFC3339),
-	))
+	)
 	_, err = cs.Dynamic.Resource(gvr).Namespace(ns).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("restarting resource: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("restarting resource: %w", err))
 	}
 
 	return connect.NewResponse(&pb.RestartResourceResponse{
@@ -648,7 +704,7 @@ func (s *Server) GetResourceCounts(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	ns := req.Msg.Namespace
@@ -728,13 +784,13 @@ func (s *Server) GetOwnedPods(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	// Resolve kind → GVR via discovery cache.
 	resources, err := s.discoveryCache.Discover(ctxName, cs.Discovery, false)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("discovering resources: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("discovering resources: %w", err))
 	}
 
 	var gvr schema.GroupVersionResource
@@ -757,7 +813,7 @@ func (s *Server) GetOwnedPods(
 	// Get the workload object.
 	obj, err := cs.Dynamic.Resource(gvr).Namespace(req.Msg.Namespace).Get(ctx, req.Msg.Name, metav1.GetOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting resource: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting resource: %w", err), connect.CodeNotFound)
 	}
 
 	// Extract spec.selector.matchLabels.
@@ -780,7 +836,7 @@ func (s *Server) GetOwnedPods(
 		LabelSelector: selectorStr,
 	})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("listing pods: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("listing pods: %w", err))
 	}
 
 	var pods []*pb.Resource
@@ -806,7 +862,7 @@ func (s *Server) GetYaml(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -823,7 +879,7 @@ func (s *Server) GetYaml(
 		obj, err = cs.Dynamic.Resource(gvr).Namespace(ns).Get(ctx, req.Msg.Name, metav1.GetOptions{})
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting resource: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting resource: %w", err), connect.CodeNotFound)
 	}
 
 	// Remove managedFields for cleaner YAML output.
@@ -844,7 +900,7 @@ func (s *Server) ApplyYaml(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	var obj unstructured.Unstructured
@@ -856,7 +912,7 @@ func (s *Server) ApplyYaml(
 	// We need to find the resource name (plural) for this GVK.
 	resources, err := s.discoveryCache.Discover(ctxName, cs.Discovery, false)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	var gvr schema.GroupVersionResource
@@ -895,16 +951,16 @@ func (s *Server) ApplyYaml(
 	if ns == "" {
 		result, err = cs.Dynamic.Resource(gvr).Patch(
 			ctx, obj.GetName(), types.ApplyPatchType, data,
-			metav1.PatchOptions{FieldManager: fieldManager, Force: boolPtr(true)},
+			metav1.PatchOptions{FieldManager: fieldManager, Force: new(true)},
 		)
 	} else {
 		result, err = cs.Dynamic.Resource(gvr).Namespace(ns).Patch(
 			ctx, obj.GetName(), types.ApplyPatchType, data,
-			metav1.PatchOptions{FieldManager: fieldManager, Force: boolPtr(true)},
+			metav1.PatchOptions{FieldManager: fieldManager, Force: new(true)},
 		)
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("applying: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("applying: %w", err))
 	}
 
 	result.SetManagedFields(nil)
@@ -924,7 +980,7 @@ func (s *Server) DiffYaml(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	gvr := schema.GroupVersionResource{
@@ -941,7 +997,7 @@ func (s *Server) DiffYaml(
 		obj, err = cs.Dynamic.Resource(gvr).Namespace(ns).Get(ctx, req.Msg.Name, metav1.GetOptions{})
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting resource: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting resource: %w", err), connect.CodeNotFound)
 	}
 
 	obj.SetManagedFields(nil)
@@ -979,10 +1035,7 @@ func computeDiff(current, proposed string) string {
 	var diff strings.Builder
 	diff.WriteString("--- current\n")
 	diff.WriteString("+++ proposed\n")
-	maxLen := len(currentLines)
-	if len(proposedLines) > maxLen {
-		maxLen = len(proposedLines)
-	}
+	maxLen := max(len(proposedLines), len(currentLines))
 	for i := 0; i < maxLen; i++ {
 		var cl, pl string
 		if i < len(currentLines) {
@@ -1075,8 +1128,6 @@ func convertToProto(obj *unstructured.Unstructured, kind string, summaryFields [
 	}
 }
 
-func boolPtr(b bool) *bool { return &b }
-
 func buildContainerInfo(name, image string, isInit bool, status corev1.ContainerStatus) *pb.ContainerInfo {
 	info := &pb.ContainerInfo{
 		Name:         name,
@@ -1115,7 +1166,7 @@ func (s *Server) ListEvents(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	ns := req.Msg.Namespace
@@ -1126,7 +1177,7 @@ func (s *Server) ListEvents(
 		eventList, err = cs.Clientset.CoreV1().Events(ns).List(ctx, metav1.ListOptions{})
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("listing events: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("listing events: %w", err))
 	}
 
 	var events []*pb.EventItem
@@ -1180,13 +1231,13 @@ func (s *Server) GetLogs(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	// List containers in the pod.
 	pod, err := cs.Clientset.CoreV1().Pods(req.Msg.Namespace).Get(ctx, req.Msg.Pod, metav1.GetOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting pod: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting pod: %w", err), connect.CodeNotFound)
 	}
 
 	var containers []string
@@ -1233,13 +1284,13 @@ func (s *Server) GetLogs(
 	logReq := cs.Clientset.CoreV1().Pods(req.Msg.Namespace).GetLogs(req.Msg.Pod, opts)
 	stream, err := logReq.Stream(ctx)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("streaming logs: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("streaming logs: %w", err))
 	}
 	defer stream.Close()
 
 	logBytes, err := io.ReadAll(io.LimitReader(stream, 5*1024*1024)) // 5MB limit
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("reading logs: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("reading logs: %w", err))
 	}
 
 	return connect.NewResponse(&pb.GetLogsResponse{
@@ -1259,12 +1310,12 @@ func (s *Server) GetPodInfo(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	pod, err := cs.Clientset.CoreV1().Pods(req.Msg.Namespace).Get(ctx, req.Msg.Pod, metav1.GetOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting pod: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting pod: %w", err), connect.CodeNotFound)
 	}
 
 	initStatusMap := make(map[string]corev1.ContainerStatus)
@@ -1320,6 +1371,11 @@ func (s *Server) handleExecWS(_ string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !isAllowedExecOrigin(r.Header.Get("Origin")) {
 			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
+		}
+
+		// Exec can run arbitrary commands in the pod, so it is a write action.
+		if s.rejectIfReadOnly(w) {
 			return
 		}
 
@@ -1394,14 +1450,12 @@ func (s *Server) handleExecWS(_ string) http.HandlerFunc {
 			return
 		}
 
-		if execErr != nil {
-			msg := fmt.Sprintf("exec failed: %v", execErr)
-			_ = conn.Write(wsCtx, websocket.MessageText, []byte("\r\n["+msg+"]\r\n"))
-			if len(msg) > 120 {
-				msg = msg[:120]
-			}
-			_ = conn.Close(websocket.StatusInternalError, msg)
+		msg := fmt.Sprintf("exec failed: %v", execErr)
+		_ = conn.Write(wsCtx, websocket.MessageText, []byte("\r\n["+msg+"]\r\n"))
+		if len(msg) > 120 {
+			msg = msg[:120]
 		}
+		_ = conn.Close(websocket.StatusInternalError, msg)
 	}
 }
 
@@ -1419,20 +1473,28 @@ func (s *Server) handleWatchWS(_ string) http.HandlerFunc {
 		}
 		nsFilter := strings.TrimSpace(r.URL.Query().Get("namespace"))
 
+		if h, blocked := s.authBlockedHealth(ctxName); blocked {
+			writeAuthBlocked(w, h)
+			return
+		}
 		cs, err := s.kubeMgr.GetClientSet(ctxName)
 		if err != nil {
+			if h, blocked := s.authBlockedHealth(ctxName); blocked {
+				writeAuthBlocked(w, h)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		// Best-effort ensure informers are running for this context.
 		s.ensureWatchCache(ctxName, cs)
 
-		ch, cancel, ok := s.watchCache.Subscribe(ctxName)
+		sub, ok := s.watchCache.Subscribe(ctxName)
 		if !ok {
 			http.Error(w, "watch cache unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		defer cancel()
+		defer sub.Cancel()
 
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 			InsecureSkipVerify: true,
@@ -1444,43 +1506,102 @@ func (s *Server) handleWatchWS(_ string) http.HandlerFunc {
 		}
 		defer conn.Close(websocket.StatusNormalClosure, "")
 
-		wsCtx := r.Context()
-		ping := time.NewTicker(20 * time.Second)
-		defer ping.Stop()
+		s.serveWatchStream(r.Context(), conn, ctxName, nsFilter, sub)
+	}
+}
 
-		type watchMsg struct {
-			Type string `json:"type"`
-			watchcache.ResourceEvent
+// watchPingInterval is how often /ws/watch sends keepalive pings.
+var watchPingInterval = 20 * time.Second
+
+// serveWatchStream pumps watch-cache events, health transitions and resync
+// requests to a /ws/watch client until the client disconnects or the
+// subscription ends.
+//
+// Message types: {"type":"resource",...}, {"type":"health","health":{...}},
+// {"type":"ping"} and {"type":"resync","reason":string}. A resync means
+// events may have been dropped and the client must do a full refetch; it is
+// sent after a subscriber buffer overflow (once the backlog drains), after
+// the context's informers are recreated, and when the context recovers from
+// an error state.
+func (s *Server) serveWatchStream(ctx context.Context, conn *websocket.Conn, ctxName, nsFilter string, sub *watchcache.Subscription) {
+	// The client never sends data; CloseRead reads (and handles) control
+	// frames so a client disconnect cancels wsCtx immediately rather than on
+	// the next failed write.
+	wsCtx := conn.CloseRead(ctx)
+
+	healthCh, healthCancel := s.kubeMgr.SubscribeHealth()
+	defer healthCancel()
+	lastState := s.kubeMgr.Health(ctxName).State
+
+	ping := time.NewTicker(watchPingInterval)
+	defer ping.Stop()
+
+	type watchMsg struct {
+		Type string `json:"type"`
+		watchcache.ResourceEvent
+	}
+
+	flushResync := func() bool {
+		reason, ok := sub.TakeResync()
+		if !ok {
+			return true
 		}
+		msg, _ := json.Marshal(struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		}{Type: "resync", Reason: reason})
+		return conn.Write(wsCtx, websocket.MessageText, msg) == nil
+	}
 
-		for {
-			select {
-			case <-wsCtx.Done():
+	events := sub.Events()
+	for {
+		select {
+		case <-wsCtx.Done():
+			return
+		case <-ping.C:
+			if err := conn.Write(wsCtx, websocket.MessageText, []byte(`{"type":"ping"}`)); err != nil {
 				return
-			case <-ping.C:
-				if err := conn.Write(wsCtx, websocket.MessageText, []byte(`{"type":"ping"}`)); err != nil {
-					return
-				}
-			case ev, ok := <-ch:
-				if !ok {
-					return
-				}
-				if nsFilter != "" && ev.Namespace != "" && ev.Namespace != nsFilter {
-					continue
-				}
-				if nsFilter != "" && ev.Namespace == "" {
-					// Keep cluster-scoped changes because they affect overview/counts.
-				}
+			}
+		case <-sub.ResyncPending():
+			if !flushResync() {
+				return
+			}
+		case h, ok := <-healthCh:
+			if !ok {
+				return
+			}
+			if h.Context != ctxName {
+				continue
+			}
+			recovered := lastState == kube.StateError && h.State == kube.StateOK
+			lastState = h.State
+			if err := conn.Write(wsCtx, websocket.MessageText, healthWatchMessage(h)); err != nil {
+				return
+			}
+			if recovered {
+				// Informers may have missed events while the watch was failing.
+				sub.MarkResync(watchcache.ResyncReasonRecovered)
+			}
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			if nsFilter == "" || ev.Namespace == "" || ev.Namespace == nsFilter {
+				// Cluster-scoped changes are kept under a namespace filter
+				// because they affect overview/counts.
 				msg, err := json.Marshal(watchMsg{
 					Type:          "resource",
 					ResourceEvent: ev,
 				})
-				if err != nil {
-					continue
+				if err == nil {
+					if err := conn.Write(wsCtx, websocket.MessageText, msg); err != nil {
+						return
+					}
 				}
-				if err := conn.Write(wsCtx, websocket.MessageText, msg); err != nil {
-					return
-				}
+			}
+			// Coalesced overflow resync goes out once the backlog drains.
+			if !flushResync() {
+				return
 			}
 		}
 	}
@@ -1580,12 +1701,12 @@ func (s *Server) ListReleases(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	releases, err := helmclient.ListReleases(cs.Config, req.Msg.Namespace)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("listing helm releases: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("listing helm releases: %w", err))
 	}
 
 	var pbReleases []*pb.HelmRelease
@@ -1603,12 +1724,12 @@ func (s *Server) GetRelease(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	rel, err := helmclient.GetRelease(cs.Config, req.Msg.Namespace, req.Msg.Name)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting helm release: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting helm release: %w", err), connect.CodeNotFound)
 	}
 
 	return connect.NewResponse(&pb.GetReleaseResponse{Release: helmReleaseToPb(rel)}), nil
@@ -1621,12 +1742,12 @@ func (s *Server) GetReleaseValues(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	values, err := helmclient.GetValues(cs.Config, req.Msg.Namespace, req.Msg.Name)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("getting helm values: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("getting helm values: %w", err))
 	}
 
 	return connect.NewResponse(&pb.GetReleaseValuesResponse{ValuesYaml: values}), nil
@@ -1639,12 +1760,12 @@ func (s *Server) GetReleaseHistory(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	revisions, err := helmclient.GetHistory(cs.Config, req.Msg.Namespace, req.Msg.Name)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("getting helm history: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("getting helm history: %w", err))
 	}
 
 	var pbRevisions []*pb.ReleaseRevision
@@ -1669,11 +1790,11 @@ func (s *Server) UninstallRelease(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	if err := helmclient.Uninstall(cs.Config, req.Msg.Namespace, req.Msg.Name); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("uninstalling helm release: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("uninstalling helm release: %w", err))
 	}
 
 	return connect.NewResponse(&pb.UninstallReleaseResponse{
@@ -1689,11 +1810,11 @@ func (s *Server) RollbackRelease(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	if err := helmclient.Rollback(cs.Config, req.Msg.Namespace, req.Msg.Name, int(req.Msg.Revision)); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("rolling back helm release: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("rolling back helm release: %w", err))
 	}
 
 	return connect.NewResponse(&pb.RollbackReleaseResponse{
@@ -1709,11 +1830,11 @@ func (s *Server) UpgradeRelease(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	if err := helmclient.Upgrade(cs.Config, req.Msg.Namespace, req.Msg.Name, req.Msg.ValuesYaml); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("upgrading helm release: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("upgrading helm release: %w", err))
 	}
 
 	return connect.NewResponse(&pb.UpgradeReleaseResponse{
@@ -1729,13 +1850,13 @@ func (s *Server) CordonNode(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	patch := []byte(`{"spec":{"unschedulable":true}}`)
 	_, err = cs.Dynamic.Resource(nodeGVR).Patch(ctx, req.Msg.Name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("cordoning node: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("cordoning node: %w", err))
 	}
 
 	return connect.NewResponse(&pb.CordonNodeResponse{
@@ -1751,13 +1872,13 @@ func (s *Server) UncordonNode(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	patch := []byte(`{"spec":{"unschedulable":false}}`)
 	_, err = cs.Dynamic.Resource(nodeGVR).Patch(ctx, req.Msg.Name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("uncordoning node: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("uncordoning node: %w", err))
 	}
 
 	return connect.NewResponse(&pb.CordonNodeResponse{
@@ -1773,14 +1894,14 @@ func (s *Server) DrainNode(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, s.toConnectError(ctxName, err)
 	}
 
 	// Cordon first.
 	patch := []byte(`{"spec":{"unschedulable":true}}`)
 	_, err = cs.Dynamic.Resource(nodeGVR).Patch(ctx, req.Msg.Name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("cordoning node for drain: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("cordoning node for drain: %w", err))
 	}
 
 	// List all pods on this node.
@@ -1788,7 +1909,7 @@ func (s *Server) DrainNode(
 		FieldSelector: "spec.nodeName=" + req.Msg.Name,
 	})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("listing pods on node: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("listing pods on node: %w", err))
 	}
 
 	evictedCount := int32(0)
@@ -1839,13 +1960,13 @@ func (s *Server) TriggerCronJob(
 	ctxName := s.resolveContext(req.Msg.Context)
 	cs, err := s.kubeMgr.GetClientSet(ctxName)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting client: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting client: %w", err), connect.CodeNotFound)
 	}
 
 	cronGVR := schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "cronjobs"}
 	cj, err := cs.Dynamic.Resource(cronGVR).Namespace(req.Msg.Namespace).Get(ctx, req.Msg.Name, metav1.GetOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("getting cronjob: %w", err))
+		return nil, s.toConnectErrorDefault(ctxName, fmt.Errorf("getting cronjob: %w", err), connect.CodeNotFound)
 	}
 
 	jobSpec, found, err := unstructured.NestedMap(cj.Object, "spec", "jobTemplate", "spec")
@@ -1860,17 +1981,17 @@ func (s *Server) TriggerCronJob(
 	}
 
 	job := &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		Object: map[string]any{
 			"apiVersion": "batch/v1",
 			"kind":       "Job",
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name":      jobName,
 				"namespace": req.Msg.Namespace,
-				"annotations": map[string]interface{}{
+				"annotations": map[string]any{
 					"cronjob.kubernetes.io/instantiate": "manual",
 				},
-				"ownerReferences": []interface{}{
-					map[string]interface{}{
+				"ownerReferences": []any{
+					map[string]any{
 						"apiVersion":         "batch/v1",
 						"kind":               "CronJob",
 						"name":               req.Msg.Name,
@@ -1887,7 +2008,7 @@ func (s *Server) TriggerCronJob(
 	jobGVR := schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
 	created, err := cs.Dynamic.Resource(jobGVR).Namespace(req.Msg.Namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("creating job: %w", err))
+		return nil, s.toConnectError(ctxName, fmt.Errorf("creating job: %w", err))
 	}
 
 	return connect.NewResponse(&pb.TriggerCronJobResponse{
@@ -2010,6 +2131,7 @@ func (s *Server) handleSetupReset(w http.ResponseWriter, r *http.Request) {
 	// Clear all cached kube clients and watch cache — they are all invalid after a reset.
 	s.kubeMgr.ClearAllClients()
 	s.watchCache.StopAll()
+	s.stopAllPortForwards()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -2064,6 +2186,7 @@ func (s *Server) handleSetupLock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Clear all cached kube clients, watch cache, and search indexes after lock.
+	s.stopAllPortForwards()
 	s.kubeMgr.ClearAllClients()
 	s.watchCache.StopAll()
 	s.searchMu.Lock()
@@ -2159,26 +2282,11 @@ func (s *Server) handleContextPreflight(w http.ResponseWriter, r *http.Request) 
 }
 
 func extractExecAuth(kubeconfigYAML string) (string, []string, error) {
-	cfg, err := clientcmd.Load([]byte(kubeconfigYAML))
-	if err != nil {
-		return "", nil, fmt.Errorf("parsing kubeconfig: %w", err)
+	execCfg, err := kube.ExecConfigFromKubeconfig(kubeconfigYAML)
+	if err != nil || execCfg == nil {
+		return "", nil, err
 	}
-	if cfg.CurrentContext == "" {
-		return "", nil, nil
-	}
-	ctx, ok := cfg.Contexts[cfg.CurrentContext]
-	if !ok || ctx == nil || strings.TrimSpace(ctx.AuthInfo) == "" {
-		return "", nil, nil
-	}
-	user, ok := cfg.AuthInfos[ctx.AuthInfo]
-	if !ok || user == nil || user.Exec == nil {
-		return "", nil, nil
-	}
-	command := strings.TrimSpace(user.Exec.Command)
-	if command == "" {
-		return "", nil, nil
-	}
-	return command, append([]string(nil), user.Exec.Args...), nil
+	return strings.TrimSpace(execCfg.Command), append([]string(nil), execCfg.Args...), nil
 }
 
 func resolveExecPath(command string) (string, bool) {
@@ -2352,6 +2460,7 @@ func (s *Server) handleProfilesDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	s.stopAllPortForwards()
 	s.refreshAfterProfileChange()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -2372,6 +2481,7 @@ func (s *Server) handleProfilesSetActive(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	s.stopAllPortForwards()
 	s.refreshAfterProfileChange()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -2399,6 +2509,9 @@ func (s *Server) handleProfilesSetColor(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handlePluginSecureStorageGet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorizePluginStorage(w, r) {
 		return
 	}
 	var body struct {
@@ -2430,6 +2543,9 @@ func (s *Server) handlePluginSecureStorageGet(w http.ResponseWriter, r *http.Req
 func (s *Server) handlePluginSecureStorageSet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorizePluginStorage(w, r) {
 		return
 	}
 	var body struct {
@@ -2468,6 +2584,9 @@ func (s *Server) handlePluginSecureStorageSet(w http.ResponseWriter, r *http.Req
 func (s *Server) handlePluginSecureStorageDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorizePluginStorage(w, r) {
 		return
 	}
 	var body struct {
@@ -2539,8 +2658,18 @@ func (s *Server) handleContextsImport(w http.ResponseWriter, r *http.Request) {
 	if s.kubeMgr.ActiveContext() == "" {
 		_ = s.kubeMgr.SetActiveContext(body.Name)
 	}
-	s.triggerSearchIndexRefresh(body.Name)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// Saving is fine (the vault is encrypted); connecting is gated: a context
+	// whose exec plugin / auth-provider / file references are not approved
+	// must not build a client, start informers or index.
+	imported := importedContextResult(s.kubeMgr, body.Name)
+	if !imported.RequiresApproval {
+		s.restartWatchedInformers(body.Name)
+		s.triggerSearchIndexRefresh(body.Name)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "ok",
+		"contexts": []importedContext{imported},
+	})
 }
 
 func (s *Server) handleContextsDelete(w http.ResponseWriter, r *http.Request) {
@@ -2564,7 +2693,8 @@ func (s *Server) handleContextsDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.kubeMgr.InvalidateClient(body.Name)
-	s.watchCache.Invalidate(body.Name)
+	s.watchCache.Remove(body.Name)
+	s.stopContextPortForwards(body.Name)
 	if s.kubeMgr.ActiveContext() == body.Name {
 		if next := s.store.LastActiveContext(); next != "" {
 			_ = s.kubeMgr.SetActiveContext(next)

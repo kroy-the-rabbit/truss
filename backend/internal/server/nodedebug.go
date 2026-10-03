@@ -32,6 +32,9 @@ func (s *Server) handleNodeDebug(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.rejectIfReadOnly(w) {
+		return
+	}
 
 	var req nodeDebugRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -137,6 +140,9 @@ func (s *Server) handleNodeDebug(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleNodeDebugDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.rejectIfReadOnly(w) {
 		return
 	}
 	q := r.URL.Query()

@@ -7,11 +7,31 @@ import type {
   TreeSectionExtension,
   ThemeExtension,
   PluginRegistrar,
+  PluginAPI,
 } from './types';
+import { createPluginAPI } from './api';
 
 type Tagged<T> = T & { _pluginId: string };
 
 class PluginRegistry {
+  // Each plugin's own API object (with its bound storage capability). Host UI
+  // passes this — never another plugin's — into the plugin's callbacks.
+  private _apis = new Map<string, PluginAPI>();
+
+  setApi(pluginId: string, api: PluginAPI): void {
+    this._apis.set(pluginId, api);
+  }
+
+  apiFor(pluginId: string): PluginAPI {
+    let api = this._apis.get(pluginId);
+    if (!api) {
+      // No capability: app-state helpers work, storage is unavailable.
+      api = createPluginAPI(pluginId, null);
+      this._apis.set(pluginId, api);
+    }
+    return api;
+  }
+
   private _healthClassifiers: Tagged<HealthClassifierExtension>[] = [];
   private _inspectorTabs: Tagged<InspectorTabExtension>[] = [];
   private _resourceColumns: Tagged<ResourceColumnExtension>[] = [];
@@ -42,6 +62,7 @@ class PluginRegistry {
   unregisterPlugin(pluginId: string): void {
     const keep = <T extends { _pluginId: string }>(arr: T[]) =>
       arr.filter((e) => e._pluginId !== pluginId);
+    this._apis.delete(pluginId);
     this._healthClassifiers = keep(this._healthClassifiers);
     this._inspectorTabs = keep(this._inspectorTabs);
     this._resourceColumns = keep(this._resourceColumns);

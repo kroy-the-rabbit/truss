@@ -1,9 +1,38 @@
 import { useAppStore } from '../state/store';
-import { fetchSetupAPI, getYamlClient } from '../api/client';
+import { getYamlClient } from '../api/client';
 import { GVR } from '../api/gen/truss/v1/resources_pb';
 import type { PluginAPI } from './types';
 
-export function createPluginAPI(pluginId: string): PluginAPI {
+interface PluginStorageBridge {
+  pluginStorageGet?(capability: string, key: string): Promise<unknown>;
+  pluginStorageSet?(capability: string, key: string, value: unknown): Promise<void>;
+  pluginStorageDelete?(capability: string, key: string): Promise<void>;
+  pluginSecureStorage?(capability: string, op: 'get' | 'set' | 'delete', key: string, value?: unknown): Promise<unknown>;
+  openSessionWindow?(opts: Record<string, string>): void;
+}
+
+function bridge(): PluginStorageBridge {
+  // contextBridge-exposed objects are frozen and the window property is
+  // read-only, so plugin code cannot swap these out to intercept another
+  // plugin's capability.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return ((window as any).electronAPI ?? {}) as PluginStorageBridge;
+}
+
+/**
+ * Build the API object handed to one plugin. `capability` is the opaque
+ * storage token main minted for this plugin; it lives only in this closure and
+ * main derives the plugin id from it, so a plugin cannot read or write another
+ * plugin's storage. The API deliberately exposes no daemon token, clipboard or
+ * terminal access (same-renderer plugin code can still reach window.electronAPI
+ * directly; consent is the control for that).
+ */
+export function createPluginAPI(pluginId: string, capability: string | null = null): PluginAPI {
+  const requireCapability = (): string => {
+    if (!capability) throw new Error(`Storage is not available to plugin "${pluginId}"`);
+    return capability;
+  };
+
   return {
     pluginId,
 
@@ -28,13 +57,11 @@ export function createPluginAPI(pluginId: string): PluginAPI {
     },
 
     openExecWindow({ context, namespace, pod, container }) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).electronAPI?.openSessionWindow({ kind: 'exec', context, namespace, pod, container });
+      bridge().openSessionWindow?.({ kind: 'exec', context, namespace, pod, container });
     },
 
     openLogsWindow({ context, namespace, pod, container }) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).electronAPI?.openSessionWindow({ kind: 'logs', context, namespace, pod, container });
+      bridge().openSessionWindow?.({ kind: 'logs', context, namespace, pod, container });
     },
 
     async fetchResourceYaml({ context, namespace, gvr, name }) {
@@ -55,46 +82,27 @@ export function createPluginAPI(pluginId: string): PluginAPI {
 
     storage: {
       async get<T>(key: string): Promise<T | null> {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return (window as any).electronAPI?.pluginStorageGet?.(pluginId, key) ?? null;
+        const cap = requireCapability();
+        return ((await bridge().pluginStorageGet?.(cap, key)) ?? null) as T | null;
       },
       async set(key, value) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await (window as any).electronAPI?.pluginStorageSet?.(pluginId, key, value);
+        await bridge().pluginStorageSet?.(requireCapability(), key, value);
       },
       async remove(key) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await (window as any).electronAPI?.pluginStorageDelete?.(pluginId, key);
+        await bridge().pluginStorageDelete?.(requireCapability(), key);
       },
+      // Secure storage goes through main (never straight to trussd): main
+      // injects the bound plugin id and the main-only storage secret.
       secure: {
         async get<T>(key: string): Promise<T | null> {
-          const resp = await fetchSetupAPI('/api/plugins/secure-storage/get', {
-            method: 'POST',
-            body: JSON.stringify({ plugin_id: pluginId, key }),
-          });
-          if (!resp.ok) return null;
-          const data = await resp.json().catch(() => ({}));
-          return ((data as { value?: T | null }).value ?? null) as T | null;
+          const cap = requireCapability();
+          return ((await bridge().pluginSecureStorage?.(cap, 'get', key)) ?? null) as T | null;
         },
         async set(key: string, value: unknown) {
-          const resp = await fetchSetupAPI('/api/plugins/secure-storage/set', {
-            method: 'POST',
-            body: JSON.stringify({ plugin_id: pluginId, key, value }),
-          });
-          if (!resp.ok) {
-            const data = await resp.json().catch(() => ({}));
-            throw new Error((data as { error?: string }).error || 'Failed to store secure value');
-          }
+          await bridge().pluginSecureStorage?.(requireCapability(), 'set', key, value);
         },
         async remove(key: string) {
-          const resp = await fetchSetupAPI('/api/plugins/secure-storage/delete', {
-            method: 'POST',
-            body: JSON.stringify({ plugin_id: pluginId, key }),
-          });
-          if (!resp.ok) {
-            const data = await resp.json().catch(() => ({}));
-            throw new Error((data as { error?: string }).error || 'Failed to delete secure value');
-          }
+          await bridge().pluginSecureStorage?.(requireCapability(), 'delete', key);
         },
       },
     },

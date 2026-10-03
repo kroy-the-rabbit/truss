@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  GO_VERSION: "1.25"
+  GO_VERSION: "1.26"
   NODE_VERSION: "24"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
@@ -112,7 +112,11 @@ jobs:
           sudo apt-get update && sudo apt-get install -y librsvg2-bin
           cd app && bash scripts/generate-icons.sh
       - name: Set version in package.json
-        run: npm --prefix app version --allow-same-version --no-git-tag-version ${{ github.ref_name }}
+        shell: bash
+        run: |
+          eval "$(bash scripts/release-version.sh "${{ github.ref_name }}")"
+          npm --prefix app version --allow-same-version --no-git-tag-version "$SEMVER"
+          npm --prefix app pkg set trussVersion="$DISPLAY_VERSION"
       - run: cd app && npm ci && npm run build
       - uses: actions/upload-artifact@v4
         with:
@@ -160,7 +164,11 @@ jobs:
           name: icon
           path: app/build/
       - name: Set version in package.json
-        run: npm --prefix app version --allow-same-version --no-git-tag-version ${{ github.ref_name }}
+        shell: bash
+        run: |
+          eval "$(bash scripts/release-version.sh "${{ github.ref_name }}")"
+          npm --prefix app version --allow-same-version --no-git-tag-version "$SEMVER"
+          npm --prefix app pkg set trussVersion="$DISPLAY_VERSION"
       - name: Make backend binary executable
         run: chmod +x backend/bin/linux/${{ matrix.arch }}/trussd
       - run: cd app && npm ci
@@ -203,7 +211,11 @@ jobs:
           name: icon
           path: app/build/
       - name: Set version in package.json
-        run: npm --prefix app version --allow-same-version --no-git-tag-version ${{ github.ref_name }}
+        shell: bash
+        run: |
+          eval "$(bash scripts/release-version.sh "${{ github.ref_name }}")"
+          npm --prefix app version --allow-same-version --no-git-tag-version "$SEMVER"
+          npm --prefix app pkg set trussVersion="$DISPLAY_VERSION"
       - name: Make backend binary executable
         run: chmod +x backend/bin/mac/${{ matrix.arch }}/trussd
       - run: cd app && npm ci
@@ -351,7 +363,11 @@ jobs:
           name: icon
           path: app/build/
       - name: Set version in package.json
-        run: npm --prefix app version --allow-same-version --no-git-tag-version ${{ github.ref_name }}
+        shell: bash
+        run: |
+          eval "$(bash scripts/release-version.sh "${{ github.ref_name }}")"
+          npm --prefix app version --allow-same-version --no-git-tag-version "$SEMVER"
+          npm --prefix app pkg set trussVersion="$DISPLAY_VERSION"
       - run: cd app && npm ci
       - name: Build Windows NSIS installer
         shell: bash

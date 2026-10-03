@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useEffect, useCallback, useState, useRef, Component, ErrorInfo, ReactNode } from 'react';
-import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
+import { QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import { TopBar } from './components/TopBar';
 import { Breadcrumb } from './components/Breadcrumb';
 import { TreeSidebar } from './panes/TreeSidebar';
@@ -15,7 +15,12 @@ import { fetchSetupAPI, getResourcesClient } from './api/client';
 import { PluginProvider } from './plugins';
 import { pluginRegistry } from './plugins';
 import { useLiveResourceInvalidation } from './hooks/useLiveResourceInvalidation';
+import { reconcileReadOnly, useReadOnlySync } from './state/readOnlySync';
+import { useConnectionStore, useConnectionSync } from './state/connectionStore';
+import { createBackoff } from './lib/backoff';
 import { ToastContainer } from './components/ToastContainer';
+import { createAppQueryClient } from './state/queryClient';
+import { ContextAuthBanner } from './components/ContextAuthBanner';
 import './styles.css';
 
 const MetricsDashboard = lazy(async () => {
@@ -44,14 +49,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 10000,
-      retry: 2,
-    },
-  },
-});
+const queryClient = createAppQueryClient();
 
 function AppLayout() {
   const {
@@ -83,6 +81,8 @@ function AppLayout() {
   } = useAppStore();
   const qc = useQueryClient();
   useLiveResourceInvalidation();
+  // Keep the daemon's server-side read-only gate in sync with the RO/Write toggle.
+  useReadOnlySync();
 
   // Restore navigation position on mount.
   // Priority: sessionStorage (lock/unlock path) → localStorage (restart path).
@@ -784,6 +784,7 @@ function AppLayout() {
   return (
     <div className="app">
       <TopBar />
+      <ContextAuthBanner context={activeContext} />
       <Breadcrumb />
       <div
         className="split-pane"
@@ -1024,10 +1025,20 @@ function SetupRouter() {
   const [neverConfirmBypass, setNeverConfirmBypass] = useState(false);
   const { setAutoLockMinutes, setNeverConfirmStartupBypass } = useAppStore();
 
+  const statusBackoffRef = useRef(createBackoff({ baseMs: 250, capMs: 5000 }));
+  const statusRetryTimerRef = useRef<number | null>(null);
+  const statusMountedRef = useRef(true);
+
   const checkStatus = useCallback(async () => {
+    if (statusRetryTimerRef.current !== null) {
+      window.clearTimeout(statusRetryTimerRef.current);
+      statusRetryTimerRef.current = null;
+    }
     try {
       const resp = await fetchSetupAPI('/api/setup-status');
       const data = await resp.json();
+      if (!statusMountedRef.current) return;
+      statusBackoffRef.current.reset();
       if (data.broken) {
         setBrokenError(data.broken_error || 'Unknown error');
         setSetupState('broken');
@@ -1039,14 +1050,59 @@ function SetupRouter() {
         setSetupState('ready');
       }
     } catch {
-      // Daemon not reachable yet — retry shortly.
-      setTimeout(checkStatus, 800);
+      // Daemon not reachable yet — retry with jittered backoff (capped at 5s);
+      // a daemon "ready" event below retries immediately.
+      if (!statusMountedRef.current) return;
+      statusRetryTimerRef.current = window.setTimeout(() => {
+        statusRetryTimerRef.current = null;
+        void checkStatus();
+      }, statusBackoffRef.current.next());
     }
   }, []);
 
   useEffect(() => {
-    checkStatus();
+    statusMountedRef.current = true;
+    void checkStatus();
+    return () => {
+      statusMountedRef.current = false;
+      if (statusRetryTimerRef.current !== null) {
+        window.clearTimeout(statusRetryTimerRef.current);
+        statusRetryTimerRef.current = null;
+      }
+    };
   }, [checkStatus]);
+
+  // While still waiting for the daemon, retry as soon as it reports ready.
+  const daemonStatus = useConnectionStore((s) => s.daemon.status);
+  const daemonEpoch = useConnectionStore((s) => s.daemon.epoch);
+  useEffect(() => {
+    if (setupState !== 'checking' || daemonStatus !== 'ready') return;
+    statusBackoffRef.current.reset();
+    void checkStatus();
+  }, [daemonStatus, daemonEpoch, setupState, checkStatus]);
+
+  // A restarted daemon starts with the store locked (the password lives only in
+  // daemon memory), so re-check setup status on every new epoch. If it is locked
+  // the password prompt is shown again and popouts are told the store is locked.
+  const readyEpochRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (daemonStatus !== 'ready') return;
+    const previous = readyEpochRef.current;
+    readyEpochRef.current = daemonEpoch;
+    if (previous === null || previous === daemonEpoch) return;
+    statusBackoffRef.current.reset();
+    void checkStatus();
+  }, [daemonStatus, daemonEpoch, checkStatus]);
+
+  const prevSetupStateRef = useRef<SetupState>(setupState);
+  useEffect(() => {
+    const previous = prevSetupStateRef.current;
+    prevSetupStateRef.current = setupState;
+    if (previous === 'ready' && setupState === 'locked') {
+      const api = (window as any).electronAPI;
+      if (api?.sessionBroadcast) void api.sessionBroadcast('locked');
+    }
+  }, [setupState]);
 
   useEffect(() => {
     if (setupState !== 'ready') return;
@@ -1215,6 +1271,9 @@ function StoreErrorScreen({ error, onReset }: { error: string; onReset: () => vo
 }
 
 export default function App() {
+  // Daemon restarts / system resume: rebuild transport, reconnect, refetch,
+  // and re-run the read-only reconcile (main window owns the RO toggle).
+  useConnectionSync(queryClient, { onDaemonRestart: () => { void reconcileReadOnly(); } });
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>

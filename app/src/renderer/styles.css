@@ -115,6 +115,31 @@ body {
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--warning) 35%, transparent);
 }
 
+.topbar-daemon-status {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.topbar-daemon-status.reconnecting {
+  color: var(--warning);
+}
+
+.topbar-daemon-status.down {
+  color: var(--error);
+}
+
+.logs-error-banner {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--error);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--error) 35%, transparent);
+}
+
+.exec-reconnect-status {
+  color: var(--warning);
+}
+
 .app-title {
   font-weight: 600;
   color: var(--accent);
@@ -5455,3 +5480,327 @@ body {
 .metrics-node-debug-del-btn { font-size: 10px; padding: 1px 5px; opacity: 0.6; background: transparent; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; color: var(--text-dim); }
 .metrics-node-debug-del-btn:hover { opacity: 1; color: var(--color-error, #f44336); border-color: currentColor; background: transparent; }
 .metrics-debug-pod-tag { font-size: 9px; background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); border-radius: 3px; padding: 1px 4px; margin-right: 4px; vertical-align: middle; }
+
+/* ── Context sign-in banner ─────────────────────────────────────────────── */
+.context-auth-banner {
+  padding: 8px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 60%, var(--border));
+  background: color-mix(in srgb, var(--warning) 14%, var(--bg-secondary));
+  color: var(--text-primary);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.context-auth-banner-quiet {
+  padding: 4px 12px;
+  border-bottom-color: var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+}
+
+.context-auth-banner-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.context-auth-banner-quiet .context-auth-banner-row {
+  align-items: center;
+}
+
+.context-auth-banner-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--warning);
+  color: var(--bg-primary);
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.context-auth-banner-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.context-auth-banner-title {
+  font-weight: 600;
+}
+
+.context-auth-banner-plugin {
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.context-auth-banner-summary {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.context-auth-banner-quiet .context-auth-banner-summary {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-auth-banner-command {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.context-auth-banner-command code {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre;
+  user-select: text;
+}
+
+.context-auth-banner-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.context-auth-btn {
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.context-auth-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.context-auth-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.context-auth-btn-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg-primary);
+}
+
+.context-auth-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.context-auth-banner-error {
+  color: var(--error);
+}
+
+.context-auth-banner-details summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.context-auth-banner-details pre {
+  margin-top: 4px;
+  padding: 6px 8px;
+  max-height: 160px;
+  overflow: auto;
+  border-radius: 4px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.metrics-error-state {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  color: var(--text-secondary);
+}
+
+.metrics-error-state-title {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* Plugin consent */
+.modal-content.plugin-consent-modal {
+  max-width: 680px;
+}
+
+.plugin-consent-body {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.plugin-consent-warning {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--warning);
+  border-radius: 6px;
+  color: var(--warning);
+  font-size: 12px;
+}
+
+.plugin-consent-details {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 8px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.plugin-consent-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.plugin-consent-footer {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+/* ── Exec credential approval ─────────────────────────────────────────── */
+.modal-content.exec-approval-modal {
+  max-width: 720px;
+  width: min(92vw, 720px);
+}
+
+.exec-approval-body {
+  padding: 12px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.exec-approval-intro {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.exec-approval-item {
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--warning) 6%, var(--bg-secondary));
+}
+
+.exec-approval-name {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+  color: var(--text-primary);
+}
+
+.exec-approval-label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.exec-approval-command {
+  margin: 4px 0 8px;
+  padding: 8px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-primary);
+}
+
+.exec-approval-row {
+  margin: 4px 0;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.exec-approval-files {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.exec-approval-field {
+  color: var(--text-dim);
+}
+
+.exec-approval-warning {
+  margin: 10px 0 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.exec-approval-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.exec-approval-status {
+  margin-top: 10px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.cm-badge-exec {
+  display: inline-block;
+  font-size: 0.68rem;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 3px;
+  padding: 0 5px;
+  margin-left: 5px;
+  vertical-align: middle;
+}
+
+.cm-badge-exec-pending {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.cm-btn-revoke {
+  font-size: 0.72rem;
+  padding: 2px 7px;
+  margin-right: 4px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cm-btn-revoke:hover {
+  border-color: var(--warning);
+  color: var(--warning);
+}
